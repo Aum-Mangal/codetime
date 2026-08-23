@@ -1,0 +1,12 @@
+# Handle line endings consistently across platforms
+* text=auto
+
+# Force LF for source files
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.ct   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf

@@ -1,0 +1,57 @@
+// Nested loops and multiplication table in CodeTime
+// Demonstrates: for-in, while, nested loops, string building
+
+// Multiplication table (1–5)
+print("Multiplication table (1-5):")
+let row = 1
+while row <= 5 {
+    let line = ""
+    let col = 1
+    while col <= 5 {
+        let product = row * col
+        let cell = str(product)
+        // Pad to 4 characters for alignment
+        while cell.length < 4 {
+            cell = " " + cell
+        }
+        line = line + cell
+        col += 1
+    }
+    print(line)
+    row += 1
+}
+
+// Prime sieve (Sieve of Eratosthenes up to 50)
+print("")
+print("Prime numbers up to 50:")
+let limit = 50
+let sieve = []
+let k = 0
+while k <= limit {
+    sieve.push(true)
+    k += 1
+}
+sieve[0] = false
+sieve[1] = false
+
+let p = 2
+while p * p <= limit {
+    if sieve[p] {
+        let multiple = p * p
+        while multiple <= limit {
+            sieve[multiple] = false
+            multiple += p
+        }
+    }
+    p += 1
+}
+
+let primes = []
+let n = 2
+while n <= limit {
+    if sieve[n] {
+        primes.push(n)
+    }
+    n += 1
+}
+print(primes)

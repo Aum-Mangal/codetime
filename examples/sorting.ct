@@ -1,0 +1,37 @@
+// Bubble Sort in CodeTime
+// Demonstrates: nested loops, array mutation, swapping
+
+fn bubbleSort(arr) {
+    let n = arr.length
+    let i = 0
+    while i < n {
+        let j = 0
+        while j < n - i - 1 {
+            if arr[j] > arr[j + 1] {
+                // Swap arr[j] and arr[j+1]
+                let temp = arr[j]
+                arr[j] = arr[j + 1]
+                arr[j + 1] = temp
+            }
+            j += 1
+        }
+        i += 1
+    }
+    return arr
+}
+
+let data = [64, 34, 25, 12, 22, 11, 90]
+print("Before sorting:")
+print(data)
+
+let sorted = bubbleSort(data)
+print("After sorting:")
+print(sorted)
+
+// Sort a string array (lexicographic)
+let words = ["banana", "apple", "cherry", "date", "elderberry"]
+print("Before sorting:")
+print(words)
+let sortedWords = bubbleSort(words)
+print("After sorting:")
+print(sortedWords)

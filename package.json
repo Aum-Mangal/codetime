@@ -1,0 +1,27 @@
+{
+  "name": "codetime",
+  "version": "1.0.0",
+  "description": "A programming language with a visual time-travel debugger",
+  "private": true,
+  "workspaces": [
+    "packages/compiler",
+    "packages/cli",
+    "packages/ide"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "eslint packages/*/src --ext .ts,.tsx",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}

@@ -1,0 +1,16 @@
+// Fibonacci sequence in CodeTime
+// Demonstrates: recursion, conditionals, while loops
+
+fn fibonacci(n) {
+    if n <= 1 {
+        return n
+    }
+    return fibonacci(n - 1) + fibonacci(n - 2)
+}
+
+// Print the first 11 fibonacci numbers (0 through 10)
+let i = 0
+while i <= 10 {
+    print("fib(" + str(i) + ") = " + str(fibonacci(i)))
+    i += 1
+}

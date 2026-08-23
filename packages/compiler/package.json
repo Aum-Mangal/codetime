@@ -1,0 +1,26 @@
+{
+  "name": "@codetime/compiler",
+  "version": "1.0.0",
+  "description": "CodeTime language compiler: lexer, parser, AST, semantic analyzer, bytecode compiler, and VM",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^2.0.0",
+    "rimraf": "^6.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

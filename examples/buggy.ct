@@ -1,0 +1,48 @@
+// Buggy Program — designed to demonstrate time-travel debugging
+//
+// This program contains a subtle off-by-one bug in a binary search
+// implementation. The bug causes incorrect results for certain inputs.
+//
+// To find the bug using the time-travel debugger:
+// 1. Run the program in debug mode
+// 2. Notice that search([1,3,5,7,9], 7) returns -1 instead of 3
+// 3. Step backward through the execution when `target` is 7
+// 4. Watch `mid`, `lo`, and `hi` evolve
+// 5. Find the step where the condition check goes wrong
+
+fn binarySearch(arr, target) {
+    let lo = 0
+    let hi = arr.length    // BUG: should be arr.length - 1
+                           // This causes hi to start out-of-bounds,
+                           // which triggers an incorrect mid calculation
+                           // and can skip the target entirely.
+
+    while lo <= hi {
+        let mid = int((lo + hi) / 2)
+        let value = arr[mid]
+
+        if value == target {
+            return mid
+        }
+
+        if value < target {
+            lo = mid + 1
+        } else {
+            hi = mid - 1
+        }
+    }
+
+    return -1  // not found
+}
+
+let sorted = [1, 3, 5, 7, 9, 11, 13, 15]
+
+// These should all succeed:
+print("Searching for 1:  index " + str(binarySearch(sorted, 1)))   // should be 0
+print("Searching for 5:  index " + str(binarySearch(sorted, 5)))   // should be 2
+print("Searching for 15: index " + str(binarySearch(sorted, 15)))  // should be 7
+
+// This one will return -1 incorrectly due to the bug:
+print("Searching for 7:  index " + str(binarySearch(sorted, 7)))   // BUG: returns -1, should be 3
+
+// The correct version would use: hi = arr.length - 1

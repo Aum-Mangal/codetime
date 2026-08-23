@@ -1,0 +1,16 @@
+// Factorial in CodeTime
+// Demonstrates: recursion, base case, multiplication
+
+fn factorial(n) {
+    if n <= 1 {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+// Calculate factorials for 0 through 12
+let i = 0
+while i <= 12 {
+    print(str(i) + "! = " + str(factorial(i)))
+    i += 1
+}

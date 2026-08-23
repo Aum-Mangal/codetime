@@ -1,0 +1,52 @@
+// Closures in CodeTime
+// Demonstrates: closures, higher-order functions, first-class functions
+
+// A counter factory — returns a function that closes over `count`
+fn makeCounter(start) {
+    let count = start
+    fn increment() {
+        count += 1
+        return count
+    }
+    return increment
+}
+
+let counter1 = makeCounter(0)
+let counter2 = makeCounter(100)
+
+print(counter1())   // 1
+print(counter1())   // 2
+print(counter1())   // 3
+print(counter2())   // 101 — independent state!
+print(counter1())   // 4
+
+// Higher-order functions: map and filter
+fn map(arr, f) {
+    let result = []
+    for item in arr {
+        result.push(f(item))
+    }
+    return result
+}
+
+fn filter(arr, pred) {
+    let result = []
+    for item in arr {
+        if pred(item) {
+            result.push(item)
+        }
+    }
+    return result
+}
+
+fn double(x) { return x * 2 }
+fn isEven(x) { return x % 2 == 0 }
+
+let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+let doubled = map(nums, double)
+let evens   = filter(nums, isEven)
+
+print("Doubled: ")
+print(doubled)
+print("Evens: ")
+print(evens)

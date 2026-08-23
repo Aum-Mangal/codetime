@@ -1,0 +1,37 @@
+// Arrays in CodeTime
+// Demonstrates: array literals, indexing, push, pop, for-in loops, length
+
+let numbers = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3]
+
+print("Original array:")
+print(numbers)
+
+print("Length: " + str(numbers.length))
+print("First: " + str(numbers[0]))
+print("Last: " + str(numbers[numbers.length - 1]))
+
+// Sum all elements
+let sum = 0
+for n in numbers {
+    sum += n
+}
+print("Sum: " + str(sum))
+
+// Build a new array of only even numbers
+let evens = []
+for n in numbers {
+    if n % 2 == 0 {
+        evens.push(n)
+    }
+}
+print("Even numbers: ")
+print(evens)
+
+// Nested arrays (2D)
+let matrix = [
+    [1, 2, 3],
+    [4, 5, 6],
+    [7, 8, 9]
+]
+
+print("Matrix element [1][2]: " + str(matrix[1][2]))  // 6
