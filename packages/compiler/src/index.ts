@@ -18,3 +18,6 @@ export * from './ast/index.js';
 
 // ── Parser ─────────────────────────────────────────────────────────────────
 export * from './parser/index.js';
+
+// ── Semantic Analysis ──────────────────────────────────────────────────────
+export * from './semantic/index.js';

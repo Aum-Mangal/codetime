@@ -10,6 +10,7 @@ import type {
   LetStmt, AssignStmt, CompoundAssignStmt, FunctionStmt,
   ReturnStmt, IfStmt, WhileStmt, ForInStmt, BlockStmt,
   ExpressionStmt, StructStmt, Parameter,
+  IntegerLiteralExpr, FloatLiteralExpr, StringLiteralExpr, BooleanLiteralExpr, IdentifierExpr,
 } from './nodes.js';
 
 const INDENT = '  ';
@@ -51,7 +52,7 @@ export function printAST(node: ASTNode, depth = 0): string {
       const n = node as IfStmt;
       const cond = printAST(n.condition, 0);
       const cons = printAST(n.consequent, depth + 1);
-      const alt  = n.alternate ? `\n${pad}(else\n${printAST(n.alternate, depth + 2)}\n${pad})` : '';
+      const alt  = n.alternate ? `\n${pad}(else\n${printAST(n.alternate, depth + 1)}\n${pad})` : '';
       return `${pad}(if ${cond}\n${cons}${alt}\n${pad})`;
     }
     case 'WhileStmt': {
@@ -76,12 +77,12 @@ export function printAST(node: ASTNode, depth = 0): string {
       const n = node as StructStmt;
       return `${pad}(struct ${n.name} { ${n.fields.join(', ')} })`;
     }
-    case 'IntegerLiteralExpr': return `${pad}${(node as { value: number }).value}`;
-    case 'FloatLiteralExpr':   return `${pad}${(node as { value: number }).value}`;
-    case 'StringLiteralExpr':  return `${pad}"${(node as { value: string }).value}"`;
-    case 'BooleanLiteralExpr': return `${pad}${(node as { value: boolean }).value}`;
+    case 'IntegerLiteralExpr': return `${pad}${(node as IntegerLiteralExpr).value}`;
+    case 'FloatLiteralExpr':   return `${pad}${(node as FloatLiteralExpr).value}`;
+    case 'StringLiteralExpr':  return `${pad}"${(node as StringLiteralExpr).value}"`;
+    case 'BooleanLiteralExpr': return `${pad}${(node as BooleanLiteralExpr).value}`;
     case 'NullLiteralExpr':    return `${pad}null`;
-    case 'IdentifierExpr':     return `${pad}${(node as { name: string }).name}`;
+    case 'IdentifierExpr':     return `${pad}${(node as IdentifierExpr).name}`;
     case 'BinaryExpr': {
       const n = node as BinaryExpr;
       return `${pad}(${n.operator} ${printAST(n.left, 0)} ${printAST(n.right, 0)})`;
