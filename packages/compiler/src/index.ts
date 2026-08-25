@@ -21,3 +21,9 @@ export * from './parser/index.js';
 
 // ── Semantic Analysis ──────────────────────────────────────────────────────
 export * from './semantic/index.js';
+
+// ── Codegen & Bytecode ─────────────────────────────────────────────────────
+export * from './codegen/index.js';
+
+// ── Virtual Machine ────────────────────────────────────────────────────────
+export * from './vm/index.js';

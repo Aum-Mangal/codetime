@@ -343,6 +343,9 @@ export class SemanticAnalyzer {
   }
 
   private analyzeFunction(stmt: FunctionStmt): void {
+    if (this.currentScope !== this.rootScope) {
+      this.declareFunction(stmt);
+    }
     // Enter function scope
     this.enterScope(ScopeType.FUNCTION);
 
