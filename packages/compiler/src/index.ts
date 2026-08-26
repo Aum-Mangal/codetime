@@ -27,3 +27,6 @@ export * from './codegen/index.js';
 
 // ── Virtual Machine ────────────────────────────────────────────────────────
 export * from './vm/index.js';
+
+// ── Time-Travel Debugger ───────────────────────────────────────────────────
+export * from './debugger/index.js';

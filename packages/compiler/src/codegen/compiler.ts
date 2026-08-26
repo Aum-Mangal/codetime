@@ -389,6 +389,7 @@ export class BytecodeCompiler {
       minArity: fnCompiler.minArity,
       chunk: fnChunk,
       upvalues: fnCompiler.upvalues,
+      localNames: fnCompiler.locals.map(l => l.name),
     };
 
     const constIdx = this.chunk.addConstant(fnValue);
@@ -705,6 +706,7 @@ export class BytecodeCompiler {
       minArity: fnCompiler.minArity,
       chunk: fnChunk,
       upvalues: fnCompiler.upvalues,
+      localNames: fnCompiler.locals.map(l => l.name),
     };
 
     const constIdx = this.chunk.addConstant(fnValue);

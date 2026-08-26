@@ -19,6 +19,7 @@ export interface FunctionValue {
   minArity: number;
   chunk: Chunk;
   upvalues: { index: number; isLocal: boolean }[];
+  localNames?: string[];
 }
 
 export interface Upvalue {
