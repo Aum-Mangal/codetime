@@ -6,4 +6,5 @@ export {
   type DebuggerEvent,
   type ExecutionSnapshot,
   type DebuggerState,
+  type Breakpoint,
 } from './types.js';

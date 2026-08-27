@@ -1,7 +1,6 @@
-@import "https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/base.min.css";
-@import "https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/components.min.css";
-@import "https://cdn.jsdelivr.net/npm/tailwindcss@3.4.1/utilities.min.css";
+@import "tailwindcss";
 
+/* ─── Base Resets ──────────────────────────────────────────────── */
 html, body, #root {
   height: 100%;
   width: 100%;
@@ -11,23 +10,24 @@ html, body, #root {
   background-color: #020617;
   color: #f8fafc;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Custom Scrollbars */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* ─── Custom Scrollbars ────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #090d16; }
+::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+/* ─── Monaco Active Line Decoration ───────────────────────────── */
+.debug-active-line {
+  background-color: rgba(56, 189, 248, 0.12) !important;
+  border-left: 3px solid #38bdf8 !important;
 }
 
-::-webkit-scrollbar-track {
-  background: #090d16;
+/* ─── Timeline fade animation ──────────────────────────────────── */
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
-
-::-webkit-scrollbar-thumb {
-  background: #1e293b;
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: #334155;
-}
+.pulsing { animation: pulse-soft 1.5s ease-in-out infinite; }

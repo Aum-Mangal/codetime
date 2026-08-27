@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Play,
-  RotateCcw,
   SkipBack,
   SkipForward,
   ChevronLeft,
@@ -9,6 +8,8 @@ import {
   Code2,
   Bug,
   Sparkles,
+  CornerDownRight,
+  FastForward,
 } from 'lucide-react';
 import type { DebuggerState } from '@codetime/compiler';
 
@@ -17,6 +18,8 @@ export interface HeaderProps {
   onDebug: () => void;
   onStepForward: () => void;
   onStepBackward: () => void;
+  onStepOver?: () => void;
+  onContinue?: () => void;
   onRestart: () => void;
   onGotoEnd: () => void;
   state: DebuggerState | null;
@@ -31,6 +34,8 @@ export const Header: React.FC<HeaderProps> = ({
   onDebug,
   onStepForward,
   onStepBackward,
+  onStepOver,
+  onContinue,
   onRestart,
   onGotoEnd,
   state,
@@ -64,7 +69,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onRun}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 rounded transition"
-            title="Run code to completion"
+            title="Run code to completion (Ctrl+Enter)"
           >
             <Play className="w-3.5 h-3.5 fill-current" />
             Run
@@ -72,7 +77,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={onDebug}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-400 hover:bg-sky-500/10 rounded transition"
-            title="Start time-travel debugging"
+            title="Start time-travel debugging (F5)"
           >
             <Bug className="w-3.5 h-3.5" />
             Debug
@@ -85,7 +90,7 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               onClick={onRestart}
               disabled={state.isAtStart}
-              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 rounded transition"
+              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
               title="Restart (Step 0)"
             >
               <SkipBack className="w-4 h-4" />
@@ -93,26 +98,46 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               onClick={onStepBackward}
               disabled={state.isAtStart}
-              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 rounded transition"
-              title="Step Backward"
+              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
+              title="Step Backward (ArrowLeft)"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
-            <span className="text-xs font-mono font-semibold px-2 text-sky-400 min-w-[70px] text-center">
+            <span className="text-xs font-mono font-semibold px-2 text-sky-400 min-w-[75px] text-center">
               {state.currentStep + 1} / {state.totalSteps}
             </span>
             <button
               onClick={onStepForward}
               disabled={state.isAtEnd}
-              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 rounded transition"
-              title="Step Forward"
+              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
+              title="Step Instruction Forward (ArrowRight)"
             >
               <ChevronRight className="w-4 h-4" />
             </button>
+            {onStepOver && (
+              <button
+                onClick={onStepOver}
+                disabled={state.isAtEnd}
+                className="p-1.5 text-sky-400 hover:text-sky-200 disabled:opacity-30 rounded transition"
+                title="Step Over Event (F10)"
+              >
+                <CornerDownRight className="w-4 h-4" />
+              </button>
+            )}
+            {onContinue && (
+              <button
+                onClick={onContinue}
+                disabled={state.isAtEnd}
+                className="p-1.5 text-emerald-400 hover:text-emerald-200 disabled:opacity-30 rounded transition"
+                title="Continue to Breakpoint (F5)"
+              >
+                <FastForward className="w-4 h-4" />
+              </button>
+            )}
             <button
               onClick={onGotoEnd}
               disabled={state.isAtEnd}
-              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 rounded transition"
+              className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
               title="Jump to End"
             >
               <SkipForward className="w-4 h-4" />

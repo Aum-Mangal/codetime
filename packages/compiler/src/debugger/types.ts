@@ -6,6 +6,7 @@ export interface VariableSnapshot {
   value: Value;
   type: string;
   displayValue: string;
+  changed?: boolean; // true if value changed from previous step
 }
 
 export interface FrameSnapshot {
@@ -24,6 +25,7 @@ export type EventType =
   | 'return'
   | 'print'
   | 'loop'
+  | 'branch'
   | 'error'
   | 'halt';
 
@@ -44,7 +46,6 @@ export interface ExecutionSnapshot {
   loc: SourceLocation;
   sourceLine: number;
   sourceColumn: number;
-  stack: Value[];
   stackDisplay: string[];
   frames: FrameSnapshot[];
   globals: VariableSnapshot[];
@@ -57,5 +58,11 @@ export interface DebuggerState {
   totalSteps: number;
   isAtStart: boolean;
   isAtEnd: boolean;
+  hasError: boolean;
   snapshot: ExecutionSnapshot;
+}
+
+export interface Breakpoint {
+  line: number;
+  enabled: boolean;
 }

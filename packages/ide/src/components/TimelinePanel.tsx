@@ -1,6 +1,6 @@
 import React, { useRef, useEffect } from 'react';
 import { DebuggerEvent } from '@codetime/compiler';
-import { History, Activity } from 'lucide-react';
+import { History } from 'lucide-react';
 
 export interface TimelinePanelProps {
   timeline: DebuggerEvent[];
@@ -15,7 +15,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll timeline to current step
+  // Auto-scroll timeline to active step
   useEffect(() => {
     if (containerRef.current) {
       const activeEl = containerRef.current.children[currentStep] as HTMLElement;
@@ -32,6 +32,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       case 'return': return 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
       case 'print':  return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
       case 'loop':   return 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30';
+      case 'branch': return 'bg-blue-500/20 text-blue-300 border-blue-500/30';
+      case 'error':  return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
       case 'halt':   return 'bg-rose-500/20 text-rose-300 border-rose-500/30';
       default:       return 'bg-slate-800 text-slate-400 border-slate-700';
     }

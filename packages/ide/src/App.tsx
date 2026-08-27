@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { DebuggerState, DebuggerEvent } from '@codetime/compiler';
 import { Header } from './components/Header';
 import { Editor } from './components/Editor';
@@ -164,6 +164,7 @@ export function App() {
   const [error, setError] = useState<{ message: string; line: number; column: number; formatted: string } | null>(null);
   const [isDebugging, setIsDebugging] = useState(false);
   const [activeTab, setActiveTab] = useState<'variables' | 'callstack' | 'memory'>('variables');
+  const [breakpoints, setBreakpoints] = useState<number[]>([]);
 
   const workerRef = useRef<Worker | null>(null);
 
@@ -181,6 +182,7 @@ export function App() {
         setTimeline(payload.timeline);
       } else if (type === 'ERROR') {
         setError(payload);
+        setIsDebugging(false);
       }
     };
 
@@ -196,45 +198,84 @@ export function App() {
       setError(null);
       setDebuggerState(null);
       setIsDebugging(false);
+      setBreakpoints([]);
     }
   };
 
-  const handleRun = () => {
+  const handleRun = useCallback(() => {
+    if (!workerRef.current) return;
+    setIsDebugging(true);
+    workerRef.current.postMessage({ type: 'RECORD_AND_END', payload: { source: code } });
+  }, [code]);
+
+  const handleDebug = useCallback(() => {
     if (!workerRef.current) return;
     setIsDebugging(true);
     workerRef.current.postMessage({ type: 'RECORD', payload: { source: code } });
-    setTimeout(() => {
-      if (workerRef.current) {
-        workerRef.current.postMessage({ type: 'GOTO_END' });
-      }
-    }, 50);
-  };
+  }, [code]);
 
-  const handleDebug = () => {
-    if (!workerRef.current) return;
-    setIsDebugging(true);
-    workerRef.current.postMessage({ type: 'RECORD', payload: { source: code } });
-  };
-
-  const handleStepForward = () => {
+  const handleStepForward = useCallback(() => {
     workerRef.current?.postMessage({ type: 'STEP_FORWARD' });
-  };
+  }, []);
 
-  const handleStepBackward = () => {
+  const handleStepBackward = useCallback(() => {
     workerRef.current?.postMessage({ type: 'STEP_BACKWARD' });
-  };
+  }, []);
 
-  const handleGotoStep = (stepIndex: number) => {
+  const handleStepOver = useCallback(() => {
+    workerRef.current?.postMessage({ type: 'STEP_OVER' });
+  }, []);
+
+  const handleContinue = useCallback(() => {
+    workerRef.current?.postMessage({ type: 'CONTINUE' });
+  }, []);
+
+  const handleGotoStep = useCallback((stepIndex: number) => {
     workerRef.current?.postMessage({ type: 'GOTO_STEP', payload: { stepIndex } });
-  };
+  }, []);
 
-  const handleRestart = () => {
+  const handleRestart = useCallback(() => {
     workerRef.current?.postMessage({ type: 'RESTART' });
+  }, []);
+
+  const handleGotoEnd = useCallback(() => {
+    workerRef.current?.postMessage({ type: 'GOTO_END' });
+  }, []);
+
+  const handleToggleBreakpoint = (line: number) => {
+    setBreakpoints((prev) => {
+      const exists = prev.includes(line);
+      const next = exists ? prev.filter((l) => l !== line) : [...prev, line];
+      workerRef.current?.postMessage({ type: 'TOGGLE_BREAKPOINT', payload: { line } });
+      return next;
+    });
   };
 
-  const handleGotoEnd = () => {
-    workerRef.current?.postMessage({ type: 'GOTO_END' });
-  };
+  // Keyboard Shortcuts Handler
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key === 'Enter') {
+        e.preventDefault();
+        handleRun();
+      } else if (e.key === 'F5') {
+        e.preventDefault();
+        if (isDebugging) handleContinue();
+        else handleDebug();
+      } else if (e.key === 'F10' && isDebugging) {
+        e.preventDefault();
+        handleStepOver();
+      } else if (e.key === 'ArrowRight' && e.altKey && isDebugging) {
+        e.preventDefault();
+        handleStepForward();
+      } else if (e.key === 'ArrowLeft' && e.altKey && isDebugging) {
+        e.preventDefault();
+        handleStepBackward();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isDebugging, handleRun, handleDebug, handleContinue, handleStepOver, handleStepForward, handleStepBackward]);
 
   const snapshot = debuggerState?.snapshot;
   const activeLine = snapshot?.sourceLine;
@@ -247,6 +288,8 @@ export function App() {
         onDebug={handleDebug}
         onStepForward={handleStepForward}
         onStepBackward={handleStepBackward}
+        onStepOver={handleStepOver}
+        onContinue={handleContinue}
         onRestart={handleRestart}
         onGotoEnd={handleGotoEnd}
         state={debuggerState}
@@ -266,6 +309,8 @@ export function App() {
               onChange={setCode}
               activeLine={activeLine}
               isDebugging={isDebugging}
+              onToggleBreakpoint={handleToggleBreakpoint}
+              breakpoints={breakpoints}
             />
           </div>
 

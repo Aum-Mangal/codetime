@@ -27,14 +27,24 @@ export const VariablesPanel: React.FC<VariablesPanelProps> = ({ locals, globals 
           ) : (
             <div className="bg-slate-950 rounded-lg border border-slate-800 divide-y divide-slate-800/60 overflow-hidden">
               {locals.map((v, i) => (
-                <div key={i} className="px-3 py-2 flex items-center justify-between hover:bg-slate-800/40">
+                <div
+                  key={i}
+                  className={`px-3 py-2 flex items-center justify-between transition ${
+                    v.changed ? 'bg-sky-500/10' : 'hover:bg-slate-800/40'
+                  }`}
+                >
                   <div className="flex items-center space-x-2">
                     <span className="font-semibold text-sky-300">{v.name}</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
                       {v.type}
                     </span>
                   </div>
-                  <span className="text-emerald-400 font-semibold truncate max-w-[180px]" title={v.displayValue}>
+                  <span
+                    className={`font-semibold truncate max-w-[180px] ${
+                      v.changed ? 'text-amber-300 font-bold' : 'text-emerald-400'
+                    }`}
+                    title={v.displayValue}
+                  >
                     {v.displayValue}
                   </span>
                 </div>
@@ -54,14 +64,24 @@ export const VariablesPanel: React.FC<VariablesPanelProps> = ({ locals, globals 
           ) : (
             <div className="bg-slate-950 rounded-lg border border-slate-800 divide-y divide-slate-800/60 overflow-hidden">
               {globals.map((v, i) => (
-                <div key={i} className="px-3 py-2 flex items-center justify-between hover:bg-slate-800/40">
+                <div
+                  key={i}
+                  className={`px-3 py-2 flex items-center justify-between transition ${
+                    v.changed ? 'bg-amber-500/10' : 'hover:bg-slate-800/40'
+                  }`}
+                >
                   <div className="flex items-center space-x-2">
                     <span className="font-semibold text-indigo-300">{v.name}</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
                       {v.type}
                     </span>
                   </div>
-                  <span className="text-emerald-400 font-semibold truncate max-w-[180px]" title={v.displayValue}>
+                  <span
+                    className={`font-semibold truncate max-w-[180px] ${
+                      v.changed ? 'text-amber-300 font-bold' : 'text-emerald-400'
+                    }`}
+                    title={v.displayValue}
+                  >
                     {v.displayValue}
                   </span>
                 </div>
