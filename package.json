@@ -11,6 +11,7 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "bench": "npm run bench --workspace=@codetime/compiler",
     "lint": "eslint packages/*/src --ext .ts,.tsx",
     "clean": "npm run clean --workspaces --if-present"
   },

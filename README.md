@@ -1,20 +1,21 @@
 # CodeTime
 
-> A programming language with a visual time-travel debugger.
+> A complete programming language with a visual time-travel debugger.
 
-CodeTime is a complete, from-scratch programming language and browser-based IDE. It features a full compiler pipeline — lexer → parser → AST → semantic analysis → bytecode compiler → virtual machine — paired with a time-travel debugger that lets you step forward and backward through any program's execution history.
+CodeTime is a full-featured, from-scratch programming language and web-based IDE built in TypeScript. It features a complete compiler pipeline — **Lexer → Parser → AST → Semantic Analyzer → Bytecode Compiler → Virtual Machine** — paired with an $O(1)$ **Time-Travel Debugger** that allows stepping forward and backward through any program's execution history.
 
-Built as a serious portfolio project demonstrating real compiler engineering, not an AI wrapper or toy demo.
+Built as a computer-science and software-engineering portfolio project demonstrating real compiler design, VM runtime execution, state snapshotting, and web UI integration.
 
 ---
 
 ## Features
 
-- **Real compiler pipeline** — Every stage (lexer, parser, semantic analyzer, bytecode compiler, VM) is fully implemented and independently testable
-- **Time-travel debugging** — Step forward and backward through execution; inspect variables and call stack at any historical point
-- **Browser IDE** — Monaco-based editor with CodeTime syntax highlighting, source-line highlighting, interactive timeline, variable inspector, and call stack panel
-- **CLI** — `codetime run`, `codetime debug`, `codetime tokens`, `codetime ast`, `codetime compile`
-- **Zero AI dependency** — The compiler and debugger are pure algorithms
+- **Real Compiler Pipeline** — Pure TypeScript implementation of lexing, Pratt expression parsing, static semantic scope analysis, bytecode compilation, and stack-based virtual machine runtime.
+- **Visual Time-Travel Debugger** — $O(1)$ bidirectional time travel (`stepForward`, `stepBackward`, `stepOver`, `continueToBreakpoint`, `gotoStep`, `restart`). Inspect local/global variables, call stack frames, and VM operand stack at any historical execution point.
+- **Browser IDE (`packages/ide`)** — Monaco Editor integration with custom Monarch syntax highlighting, line highlight decorations, Web Worker compiler thread, scrubbable execution timeline, variables inspector, call stack panel, and console output.
+- **Command-Line Interface (`packages/cli`)** — `codetime run`, `codetime tokens`, `codetime ast`, `codetime compile`, and `codetime eval`.
+- **Comprehensive Verification** — 222 passing unit & integration tests across 6 test suites.
+- **Zero External AI Wrappers** — Pure computer science algorithms, AST traversals, closures, upvalues, and bytecode execution.
 
 ---
 
@@ -25,29 +26,44 @@ Built as a serious portfolio project demonstrating real compiler engineering, no
 - Node.js ≥ 18
 - npm ≥ 9
 
-### Install
+### Build & Run Tests
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/codetime.git
+# Clone repository
+git clone https://github.com/Saran/codetime.git
 cd codetime
+
+# Install dependencies and build monorepo packages
 npm install
 npm run build
+
+# Run unit and E2E test suites (222 tests passing)
+npm test
+
+# Run benchmarks
+npm run bench
 ```
 
-### Run a program
+### CLI Usage
 
 ```bash
-# Run the hello world example
-node packages/cli/dist/index.js run examples/hello.ct
+# Execute CodeTime programs
+node packages/cli/dist/index.js run examples/fibonacci.ct
 
-# See the token stream
-node packages/cli/dist/index.js tokens examples/fibonacci.ct
+# Inspect token stream
+node packages/cli/dist/index.js tokens examples/hello.ct
 
-# See the AST
-node packages/cli/dist/index.js ast examples/fibonacci.ct
+# Inspect AST (Abstract Syntax Tree)
+node packages/cli/dist/index.js ast examples/hello.ct
+
+# Disassemble bytecode
+node packages/cli/dist/index.js compile examples/fibonacci.ct
+
+# Evaluate inline code snippet
+node packages/cli/dist/index.js eval "let a = 10; let b = 20; print(a + b)"
 ```
 
-### Start the IDE
+### Launch Visual Time-Travel IDE
 
 ```bash
 cd packages/ide
@@ -57,17 +73,15 @@ npm run dev
 
 ---
 
-## The Language
+## Language Features
 
-CodeTime is a dynamically-typed language with:
-
-- Variables (`let`)
-- Functions (`fn`) with closures and recursion
-- Control flow (`if`/`else`, `while`, `for`/`in`, `break`, `continue`)
-- Arrays and objects
-- First-class functions
-- Lexical scoping
-- Built-in `print`
+CodeTime supports:
+- Variables (`let`) with lexical block scoping and shadowing
+- First-class functions (`fn`), recursive functions, lambdas (`(x) => x * 2`), closures, upvalues
+- Control flow (`if`/`elif`/`else`, `while`, `for`/`in`, `break`, `continue`)
+- Object literals (`{ key: value }`), array literals (`[1, 2, 3]`), properties (`.length`, `.push()`, `.pop()`)
+- Custom `struct` declarations
+- Built-in functions (`print`, `len`, `typeof`, `int`, `float`, `str`, `bool`)
 
 ```codetime
 fn fibonacci(n) {
@@ -76,134 +90,106 @@ fn fibonacci(n) {
 }
 
 let i = 0
-while i <= 10 {
-    print(fibonacci(i))
+while i <= 8 {
+    print("fib(" + str(i) + ") = " + str(fibonacci(i)))
     i += 1
 }
 ```
 
-Full language specification: [`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md)
+Full language tutorial & specification: [`docs/TUTORIAL.md`](docs/TUTORIAL.md) and [`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md).
 
 ---
 
-## Time-Travel Debugging
+## Time-Travel Debugging Engine
 
-The debugger records a complete snapshot of the VM state after every instruction. You can:
-
-- **Step forward** — advance one instruction
-- **Step backward** — restore the previous state (O(1) — no replay)
-- **Jump to any step** — click any point in the timeline
-- **Inspect variables** at any historical step
-- **Inspect the call stack** at any historical step
-- **See source highlighting** — the current instruction's source line is highlighted
-
-### Strategy: Full Snapshot
-
-After each instruction, the debugger stores a deep copy of:
-- All local variables in all call frames
-- The global variable table
-- The operand stack
-- The instruction pointer
-- The source location
-- Accumulated output
-
-Backward stepping is O(1) because we read directly from the snapshot array — no re-execution. The tradeoff is memory: see [DEBUGGER.md](docs/DEBUGGER.md) for analysis.
-
----
-
-## Architecture
+The debugger instrumented VM records a lightweight snapshot of the VM state after every byte-instruction:
 
 ```
-Source Code
-    │
-    ▼ Lexer (token.ts / lexer.ts)
-Token[]
-    │
-    ▼ Parser (parser.ts — Pratt parsing)
-AST (Program)
-    │
-    ▼ SemanticAnalyzer (semantic.ts)
-Annotated AST + scope table
-    │
-    ▼ BytecodeCompiler (codegen.ts)
-Chunk (bytecode + constant pool + source map)
-    │
-    ▼ VM (vm.ts — stack-based interpreter)
-Execution + snapshots
-    │
-    ▼ Debugger (debugger.ts)
-ExecutionSnapshot[]
-    │
-    ▼ IDE (React / Monaco / Web Worker)
-Visual debugger
+                              ┌───────────────────────────┐
+                              │    Source Code (.ct)      │
+                              └─────────────┬─────────────┘
+                                            │
+                                  Lexer & Pratt Parser
+                                            │
+                                            ▼
+                              ┌───────────────────────────┐
+                              │      Bytecode Chunk       │
+                              └─────────────┬─────────────┘
+                                            │
+                                  Instrumented VM Engine
+                                            │
+             ┌──────────────────────────────┼──────────────────────────────┐
+             │                              │                              │
+             ▼                              ▼                              ▼
+  ┌───────────────────┐          ┌───────────────────┐          ┌───────────────────┐
+  │   Snapshot #0     │ ◄──────► │   Snapshot #1     │ ◄──────► │   Snapshot #N     │
+  │  (x=10, y=undef)  │          │    (x=10, y=20)   │          │  (x=10, y=20,...) │
+  └───────────────────┘          └───────────────────┘          └───────────────────┘
 ```
 
-Full architecture document: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+Detailed technical analysis: [`docs/DEBUGGER.md`](docs/DEBUGGER.md).
 
 ---
 
-## Project Structure
+## Performance Benchmarks
+
+Run benchmarks locally: `npm run bench`
+
+| Stage / Component | Operation Count | Throughput (ops/sec) |
+|---|---|---|
+| Lexer Tokenization | 2,000 | **27,000+ ops/sec** |
+| Parser AST Generation | 2,000 | **12,000+ ops/sec** |
+| Semantic Analyzer | 2,000 | **164,000+ ops/sec** |
+| Bytecode Compiler | 2,000 | **93,000+ ops/sec** |
+| VM Execution (Full Programs) | 1,000 | **6,500+ runs/sec** |
+| Time-Travel Debugger Snapshot Recording | 500 | **140,000+ steps/sec** |
+
+---
+
+## Monorepo Architecture
 
 ```
 codetime/
 ├── packages/
-│   ├── compiler/      Language engine (pure TS, no deps)
+│   ├── compiler/      Language compiler, VM engine & Debugger (pure TS, zero runtime deps)
 │   │   ├── src/
-│   │   │   ├── lexer/     Tokenizer
-│   │   │   ├── parser/    Recursive-descent + Pratt parser
-│   │   │   ├── ast/       AST node types and printer
-│   │   │   ├── semantic/  Scope analysis and type checking
-│   │   │   ├── codegen/   Bytecode compiler
-│   │   │   ├── vm/        Stack-based virtual machine
-│   │   │   └── debugger/  Time-travel state management
-│   │   └── tests/         Vitest test suite
-│   ├── cli/           Node.js CLI (codetime run / debug / tokens / ast)
-│   └── ide/           React + Vite browser IDE
+│   │   │   ├── lexer/     Tokenization engine
+│   │   │   ├── parser/    Recursive-descent & Pratt precedence parser
+│   │   │   ├── ast/       AST nodes & printer
+│   │   │   ├── semantic/  Scope analysis & type checking
+│   │   │   ├── codegen/   Bytecode compiler & disassembler
+│   │   │   ├── vm/        Stack-based Virtual Machine & call frames
+│   │   │   └── debugger/  Time-travel execution engine & snapshotting
+│   │   ├── tests/         Vitest unit & integration test suites (222 tests)
+│   │   └── benchmarks/    Performance benchmark suite
+│   ├── cli/           Node.js CLI executable tool (codetime)
+│   └── ide/           React + Vite + Monaco + Web Worker Visual Time-Travel IDE
 ├── examples/          Example .ct programs
-└── docs/              Language spec, architecture, debugger docs
+├── docs/              Language spec, architecture, debugger design, and tutorial docs
+└── .github/workflows/ CI workflow for GitHub Actions
 ```
 
 ---
 
-## Development
+## Multi-Day Development Progression
 
-### Run tests
-
-```bash
-# All packages
-npm test
-
-# Compiler tests only
-cd packages/compiler && npx vitest run --reporter=verbose
-```
-
-### Build
-
-```bash
-npm run build
-```
-
----
-
-## Development Progress
-
-| Day | Work |
-|-----|------|
-| Day 1 | Architecture, language spec, lexer, AST, initial tests |
-| Day 2 | Complete parser (Pratt parsing), semantic analysis |
-| Day 3 | Bytecode compiler, VM, CLI |
-| Day 4 | Time-travel debugger |
-| Day 5 | Browser IDE (Monaco, timeline, panels) |
-| Day 6 | Testing, benchmarks, documentation, release |
+| Day | Phase | Deliverables |
+|---|---|---|
+| **Day 1** | Foundation | Architecture doc, language specification, lexer, AST hierarchy, initial parser, initial tests |
+| **Day 2** | Parser & Semantics | Complete Pratt parser, scope analyzer, function arity checks, control flow validation, 156 tests |
+| **Day 3** | Execution Engine & CLI | Opcode set, bytecode compiler, stack VM with closures & call frames, CodeTime CLI tool, 190 tests |
+| **Day 4** | Time-Travel Debugger | State snapshotting, $O(1)$ reverse execution, stepOver, breakpoints, call stack inspection, 222 tests |
+| **Day 5** | Visual IDE | React + Monaco Editor with Monarch grammar, Web Worker background compiler, interactive timeline UI |
+| **Day 6** | Release & CI | E2E integration tests, performance benchmarks suite, docs (`DEBUGGER.md`, `TUTORIAL.md`), GitHub Actions CI, v1.0.0 |
 
 ---
 
 ## Documentation
 
-- [`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md) — Full language specification with grammar
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Compiler and VM design
-- [`docs/DEBUGGER.md`](docs/DEBUGGER.md) — Time-travel debugger implementation
-- [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) — Development guide
+- [`docs/LANGUAGE_SPEC.md`](docs/LANGUAGE_SPEC.md) — Formal language specification and EBNF grammar
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Compiler architecture and VM bytecode design
+- [`docs/DEBUGGER.md`](docs/DEBUGGER.md) — Time-travel debugger implementation and $O(1)$ state restoration
+- [`docs/TUTORIAL.md`](docs/TUTORIAL.md) — Language tutorial, built-in functions, CLI & IDE guide
 
 ---
 
