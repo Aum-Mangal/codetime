@@ -1,4 +1,4 @@
-import { Lexer, Parser, SemanticAnalyzer, BytecodeCompiler, VM, TimeTravelDebugger } from '../src/index.js';
+import { Lexer, Parser, SemanticAnalyzer, BytecodeCompiler, VM, TimeTravelDebugger } from '../src/index';
 
 interface BenchmarkResult {
   name: string;
