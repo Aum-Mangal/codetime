@@ -1,0 +1,250 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="100%" height="100%" style="border-radius:12px; font-family:'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, sans-serif;">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0f1d" />
+      <stop offset="100%" stop-color="#040711" />
+    </linearGradient>
+    <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#141c2e" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#818cf8" />
+    </linearGradient>
+    <linearGradient id="btnGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+    <linearGradient id="timelineGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="40%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#1e293b" />
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <!-- Window Frame -->
+  <rect width="1200" height="680" rx="12" fill="url(#bg)" stroke="#1e293b" stroke-width="1.5" filter="url(#shadow)"/>
+
+  <!-- Window Top Bar -->
+  <rect width="1200" height="44" rx="12" fill="url(#headerGrad)" />
+  <rect y="36" width="1200" height="8" fill="url(#headerGrad)" />
+  <line x1="0" y1="44" x2="1200" y2="44" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Window Controls -->
+  <circle cx="24" cy="22" r="6" fill="#ef4444" />
+  <circle cx="44" cy="22" r="6" fill="#f59e0b" />
+  <circle cx="64" cy="22" r="6" fill="#10b981" />
+
+  <!-- Logo & Title -->
+  <text x="96" y="27" fill="#f8fafc" font-size="14" font-weight="700" letter-spacing="0.5">CodeTime IDE</text>
+  <rect x="200" y="12" width="70" height="20" rx="4" fill="#0369a1" fill-opacity="0.3" stroke="#38bdf8" stroke-width="0.8"/>
+  <text x="210" y="26" fill="#38bdf8" font-size="11" font-weight="600">v1.0.0 Live</text>
+
+  <!-- Debugger Toolbar Controls -->
+  <g transform="translate(420, 10)">
+    <!-- Run / Debug Button -->
+    <rect x="0" y="0" width="74" height="24" rx="4" fill="url(#btnGrad)"/>
+    <polygon points="12,7 12,17 20,12" fill="#ffffff" />
+    <text x="26" y="16" fill="#ffffff" font-size="11" font-weight="600">Debug</text>
+
+    <!-- Step Backward (Rewind Time) -->
+    <rect x="84" y="0" width="94" height="24" rx="4" fill="#1e293b" stroke="#38bdf8" stroke-width="1"/>
+    <text x="92" y="16" fill="#38bdf8" font-size="13">⏮</text>
+    <text x="110" y="16" fill="#38bdf8" font-size="11" font-weight="600">Step Back</text>
+
+    <!-- Step Forward -->
+    <rect x="188" y="0" width="86" height="24" rx="4" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="196" y="16" fill="#94a3b8" font-size="13">⏭</text>
+    <text x="214" y="16" fill="#e2e8f0" font-size="11" font-weight="600">Step Next</text>
+
+    <!-- Step Over -->
+    <rect x="284" y="0" width="80" height="24" rx="4" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="292" y="16" fill="#94a3b8" font-size="11">↷</text>
+    <text x="306" y="16" fill="#e2e8f0" font-size="11" font-weight="600">Step Over</text>
+
+    <!-- Continue / Resume -->
+    <rect x="374" y="0" width="76" height="24" rx="4" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="382" y="16" fill="#10b981" font-size="12">▶</text>
+    <text x="396" y="16" fill="#e2e8f0" font-size="11" font-weight="600">Continue</text>
+  </g>
+
+  <!-- Example Selector Badge -->
+  <g transform="translate(1000, 10)">
+    <rect x="0" y="0" width="180" height="24" rx="4" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+    <text x="12" y="16" fill="#94a3b8" font-size="11">Example:</text>
+    <text x="64" y="16" fill="#38bdf8" font-size="11" font-weight="600">buggy_binary_search.ct</text>
+  </g>
+
+  <!-- Main Body Layout Split -->
+  <!-- Left Side: Code Editor (x:0, y:44, w:760, h:456) -->
+  <rect x="0" y="44" width="760" height="456" fill="#090d16" />
+  <line x1="760" y1="44" x2="760" y2="500" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Editor Tab Bar -->
+  <rect x="0" y="44" width="760" height="32" fill="#0f172a" />
+  <rect x="0" y="44" width="180" height="32" fill="#090d16" stroke="#1e293b" stroke-width="1"/>
+  <text x="20" y="65" fill="#38bdf8" font-size="12" font-family="'Fira Code', monospace" font-weight="600">binarySearch.ct</text>
+  <line x1="0" y1="76" x2="760" y2="76" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Editor Gutter & Line Numbers -->
+  <rect x="0" y="76" width="50" height="424" fill="#090d16" />
+  <line x1="50" y1="76" x2="50" y2="500" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Line Numbers -->
+  <g font-family="'Fira Code', monospace" font-size="12" fill="#475569" text-anchor="end">
+    <text x="40" y="105">10</text>
+    <text x="40" y="127">11</text>
+    <text x="40" y="149">12</text>
+    <text x="40" y="171">13</text>
+    <text x="40" y="193">14</text>
+    <text x="40" y="215">15</text>
+    <text x="40" y="237">16</text>
+    <text x="40" y="259">17</text>
+    <text x="40" y="281">18</text>
+    <text x="40" y="303">19</text>
+    <text x="40" y="325">20</text>
+    <text x="40" y="347">21</text>
+    <text x="40" y="369">22</text>
+    <text x="40" y="391">23</text>
+    <text x="40" y="413">24</text>
+  </g>
+
+  <!-- Breakpoint dot on line 18 -->
+  <circle cx="20" cy="277" r="5" fill="#ef4444" stroke="#fca5a5" stroke-width="1"/>
+
+  <!-- Line 15: Bug highlight band -->
+  <rect x="51" y="200" width="708" height="22" fill="#ef4444" fill-opacity="0.12" stroke="#ef4444" stroke-opacity="0.4" stroke-width="0.8"/>
+  <rect x="51" y="200" width="3" height="22" fill="#ef4444"/>
+
+  <!-- Line 21: Active Time-Travel Execution Step highlight band -->
+  <rect x="51" y="332" width="708" height="22" fill="#0284c7" fill-opacity="0.22" stroke="#38bdf8" stroke-width="1"/>
+  <polygon points="54,343 62,338 62,348" fill="#38bdf8" />
+
+  <!-- Code Content -->
+  <g font-family="'Fira Code', Consolas, monospace" font-size="12" fill="#cbd5e1" xml:space="preserve">
+    <text x="70" y="105"><tspan fill="#64748b">// Binary search with off-by-one boundary bug</tspan></text>
+    <text x="70" y="127"><tspan fill="#818cf8" font-weight="600">fn</tspan> <tspan fill="#38bdf8">binarySearch</tspan>(arr, target) {</text>
+    <text x="70" y="149">    <tspan fill="#818cf8" font-weight="600">let</tspan> lo = <tspan fill="#f59e0b">0</tspan></text>
+    <text x="70" y="171">    <tspan fill="#818cf8" font-weight="600">let</tspan> hi = arr.<tspan fill="#e2e8f0">length</tspan>   <tspan fill="#ef4444" font-weight="600">◀ BUG: should be arr.length - 1</tspan></text>
+    <text x="70" y="193"></text>
+    <text x="70" y="215">    <tspan fill="#818cf8" font-weight="600">while</tspan> lo &lt;= hi {</text>
+    <text x="70" y="237">        <tspan fill="#818cf8" font-weight="600">let</tspan> mid = <tspan fill="#38bdf8">int</tspan>((lo + hi) / <tspan fill="#f59e0b">2</tspan>)</text>
+    <text x="70" y="259">        <tspan fill="#818cf8" font-weight="600">let</tspan> value = arr[mid]</text>
+    <text x="70" y="281"></text>
+    <text x="70" y="303">        <tspan fill="#818cf8" font-weight="600">if</tspan> value == target {</text>
+    <text x="70" y="325">            <tspan fill="#f43f5e" font-weight="600">return</tspan> mid</text>
+    <text x="70" y="347">        }</text>
+    <text x="70" y="369">        <tspan fill="#818cf8" font-weight="600">if</tspan> value &lt; target { lo = mid + <tspan fill="#f59e0b">1</tspan> } <tspan fill="#818cf8" font-weight="600">else</tspan> { hi = mid - <tspan fill="#f59e0b">1</tspan> }</text>
+    <text x="70" y="391">    }</text>
+    <text x="70" y="413">    <tspan fill="#f43f5e" font-weight="600">return</tspan> -<tspan fill="#f59e0b">1</tspan></text>
+  </g>
+
+  <!-- Right Side: Debugger Inspection Panels (x:760, y:44, w:440, h:456) -->
+  <rect x="760" y="44" width="440" height="456" fill="#0b1120" />
+
+  <!-- Panel Tabs -->
+  <rect x="760" y="44" width="440" height="32" fill="#0f172a" />
+  <!-- Active Tab: Variables -->
+  <rect x="760" y="44" width="130" height="32" fill="#0b1120" stroke="#38bdf8" stroke-width="0" />
+  <line x1="760" y1="75" x2="890" y2="75" stroke="#38bdf8" stroke-width="2"/>
+  <text x="790" y="65" fill="#38bdf8" font-size="12" font-weight="700">Variables</text>
+
+  <!-- Inactive Tab: Call Stack -->
+  <text x="925" y="65" fill="#94a3b8" font-size="12">Call Stack (2)</text>
+  <!-- Inactive Tab: VM Stack -->
+  <text x="1055" y="65" fill="#94a3b8" font-size="12">Operand Stack</text>
+  <line x1="760" y1="76" x2="1200" y2="76" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Variables Content Header -->
+  <text x="780" y="102" fill="#64748b" font-size="11" font-weight="700" letter-spacing="0.5">LOCAL VARIABLES (SCOPE: binarySearch)</text>
+  <rect x="776" y="112" width="408" height="150" rx="6" fill="#090e1a" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Variable Rows -->
+  <g font-family="'Fira Code', monospace" font-size="12">
+    <!-- row 1 -->
+    <rect x="777" y="113" width="406" height="28" fill="#0f172a" fill-opacity="0.5"/>
+    <text x="790" y="132" fill="#818cf8">lo</text>
+    <text x="890" y="132" fill="#94a3b8">number</text>
+    <text x="990" y="132" fill="#f59e0b" font-weight="600">0</text>
+
+    <!-- row 2: hi (buggy value highlighted) -->
+    <rect x="777" y="141" width="406" height="28" fill="#ef4444" fill-opacity="0.1"/>
+    <text x="790" y="160" fill="#818cf8">hi</text>
+    <text x="890" y="160" fill="#94a3b8">number</text>
+    <text x="990" y="160" fill="#ef4444" font-weight="700">8  (out of bounds)</text>
+
+    <!-- row 3: mid -->
+    <rect x="777" y="169" width="406" height="28" fill="#0f172a" fill-opacity="0.5"/>
+    <text x="790" y="188" fill="#818cf8">mid</text>
+    <text x="890" y="188" fill="#94a3b8">number</text>
+    <text x="990" y="188" fill="#38bdf8" font-weight="600">4</text>
+
+    <!-- row 4: value -->
+    <rect x="777" y="197" width="406" height="28" fill="#transparent"/>
+    <text x="790" y="216" fill="#818cf8">value</text>
+    <text x="890" y="216" fill="#94a3b8">number</text>
+    <text x="990" y="216" fill="#f59e0b" font-weight="600">9</text>
+
+    <!-- row 5: target -->
+    <rect x="777" y="225" width="406" height="28" fill="#0f172a" fill-opacity="0.5"/>
+    <text x="790" y="244" fill="#818cf8">target</text>
+    <text x="890" y="244" fill="#94a3b8">number</text>
+    <text x="990" y="244" fill="#10b981" font-weight="600">7</text>
+  </g>
+
+  <!-- Call Stack Box -->
+  <text x="780" y="286" fill="#64748b" font-size="11" font-weight="700" letter-spacing="0.5">CALL STACK FRAMES</text>
+  <rect x="776" y="296" width="408" height="70" rx="6" fill="#090e1a" stroke="#1e293b" stroke-width="1"/>
+  <g font-family="'Fira Code', monospace" font-size="11">
+    <rect x="777" y="297" width="406" height="32" fill="#0284c7" fill-opacity="0.15"/>
+    <text x="790" y="318" fill="#38bdf8" font-weight="600">► binarySearch(arr, 7)</text>
+    <text x="1100" y="318" fill="#64748b" text-anchor="end">line 21</text>
+
+    <text x="790" y="352" fill="#94a3b8">&lt;script&gt; (global main)</text>
+    <text x="1100" y="352" fill="#64748b" text-anchor="end">line 46</text>
+  </g>
+
+  <!-- Output Console (Right Bottom) -->
+  <text x="780" y="394" fill="#64748b" font-size="11" font-weight="700" letter-spacing="0.5">CONSOLE OUTPUT</text>
+  <rect x="776" y="404" width="408" height="84" rx="6" fill="#050811" stroke="#1e293b" stroke-width="1"/>
+  <g font-family="'Fira Code', monospace" font-size="11">
+    <text x="790" y="424" fill="#10b981">Searching for 1: index 0 ✓</text>
+    <text x="790" y="444" fill="#10b981">Searching for 5: index 2 ✓</text>
+    <text x="790" y="464" fill="#ef4444" font-weight="600">Searching for 7: index -1 ✗ [BUG: Expected 3]</text>
+  </g>
+
+  <!-- Bottom Execution Timeline Bar (x:0, y:500, w:1200, h:180) -->
+  <line x1="0" y1="500" x2="1200" y2="500" stroke="#1e293b" stroke-width="1"/>
+  <rect x="0" y="500" width="1200" height="180" fill="#070c17"/>
+
+  <!-- Timeline Header Info -->
+  <text x="24" y="530" fill="#f8fafc" font-size="13" font-weight="700">⏱️ Execution Timeline</text>
+  <text x="160" y="530" fill="#94a3b8" font-size="12">Step <tspan fill="#38bdf8" font-weight="700">48</tspan> of 142 total bytecode steps</text>
+  <text x="1176" y="530" fill="#38bdf8" font-size="11" font-family="'Fira Code', monospace" text-anchor="end">IP: 0x002A | OpCode: OP_GET_LOCAL [lo]</text>
+
+  <!-- Timeline Track & Slider -->
+  <rect x="24" y="550" width="1152" height="12" rx="6" fill="#1e293b"/>
+  <rect x="24" y="550" width="390" height="12" rx="6" fill="url(#timelineGrad)"/>
+
+  <!-- Timeline Scrubber Handle -->
+  <circle cx="414" cy="556" r="10" fill="#38bdf8" stroke="#ffffff" stroke-width="2"/>
+  <polygon points="414,540 408,548 420,548" fill="#38bdf8"/>
+
+  <!-- Time Travel Quick Markers -->
+  <g font-family="'Fira Code', monospace" font-size="10" fill="#64748b">
+    <text x="24" y="582">Step 0 (init)</text>
+    <text x="414" y="582" fill="#38bdf8" font-weight="700" text-anchor="middle">Step 48 (REWOUND HERE)</text>
+    <text x="750" y="582" text-anchor="middle">Step 90 (lo &gt; hi exit)</text>
+    <text x="1176" y="582" text-anchor="end">Step 142 (exit code 0)</text>
+  </g>
+
+  <!-- Event Log / Instruction Breadcrumb -->
+  <rect x="24" y="600" width="1152" height="56" rx="6" fill="#0b1120" stroke="#1e293b" stroke-width="1"/>
+  <text x="40" y="624" fill="#38bdf8" font-size="12" font-family="'Fira Code', monospace" font-weight="600">REVERSE EXECUTION TRACE:</text>
+  <text x="220" y="624" fill="#cbd5e1" font-size="12" font-family="'Fira Code', monospace">Restored state from Step 49 ➔ Step 48 in 0.04ms (O(1) memory pointer lookup)</text>
+  <text x="40" y="644" fill="#94a3b8" font-size="11">Inspect intermediate evaluation states, reverse through function boundaries, or jump directly to any breakpoint along the timeline.</text>
+</svg>
