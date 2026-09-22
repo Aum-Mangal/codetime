@@ -102,7 +102,7 @@ print("Fib:", fib10, "Sorted:", sorted)
 
   // 6. Time-Travel Debugger Snapshot Recording Benchmark
   results.push(
-    runBench('Time-Travel Debugger Recording', 500, () => {
+    runBench('Time-Travel Debugger Recording', 100, () => {
       TimeTravelDebugger.fromSource(largeSource);
     })
   );
@@ -123,7 +123,7 @@ print("Fib:", fib10, "Sorted:", sorted)
   const sampleDbg = TimeTravelDebugger.fromSource(largeSource);
   const dbgResult = results.find(r => r.name.includes('Debugger'))!;
   console.log(`Recorded Snapshots per Run : ${sampleDbg.totalSteps} steps`);
-  console.log(`Snapshot Recording Speed  : ${Math.round((sampleDbg.totalSteps * 500 / dbgResult.timeMs) * 1000).toLocaleString()} steps/sec`);
+  console.log(`Snapshot Recording Speed  : ${Math.round((sampleDbg.totalSteps * 100 / dbgResult.timeMs) * 1000).toLocaleString()} steps/sec`);
   console.log('===========================================================\n');
 }
 
