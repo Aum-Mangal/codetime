@@ -1,161 +1,93 @@
 import React from 'react';
-import {
-  Play,
-  SkipBack,
-  SkipForward,
-  ChevronLeft,
-  ChevronRight,
-  Code2,
-  Bug,
-  Sparkles,
-  CornerDownRight,
-  CornerUpLeft,
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  ArrowDownFromLine,
-  Undo2,
-  FastForward,
-  Rewind,
-  Loader2,
-} from 'lucide-react';
-import type { DebuggerState, NavigationCommand } from '@codetime/compiler';
+import { Play, Bug, SquareCode, Share2, ChevronDown, Loader2, Check } from 'lucide-react';
 
 export interface HeaderProps {
   onRun: () => void;
   onDebug: () => void;
-  onNavigate: (command: NavigationCommand) => void;
-  state: DebuggerState | null;
-  isDebugging: boolean;
   isRecording: boolean;
   selectedExample: string;
   onSelectExample: (name: string) => void;
   examples: { name: string; label: string }[];
+  onShare: () => void;
+  /** True for a moment after the share link was copied. */
+  shareCopied: boolean;
 }
 
-interface NavButton {
-  command: NavigationCommand;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  /** Backward commands are disabled at the first step, forward ones at the last. */
-  backward: boolean;
-  color: string;
-}
-
-const BACKWARD_BUTTONS: NavButton[] = [
-  { command: 'restart', label: 'Go to first step', icon: SkipBack, backward: true, color: 'text-slate-400 hover:text-white' },
-  { command: 'reverseContinue', label: 'Reverse continue to previous breakpoint (Shift+F5)', icon: Rewind, backward: true, color: 'text-rose-300 hover:text-rose-100' },
-  { command: 'reverseStepOut', label: 'Reverse step out: back to the line that called this function', icon: ArrowDownFromLine, backward: true, color: 'text-rose-300 hover:text-rose-100' },
-  { command: 'reverseStepInto', label: 'Reverse step into: previous line, entering calls backward', icon: Undo2, backward: true, color: 'text-rose-300 hover:text-rose-100' },
-  { command: 'reverseStepOver', label: 'Reverse step over: previous line (Shift+F10)', icon: CornerUpLeft, backward: true, color: 'text-rose-300 hover:text-rose-100' },
-  { command: 'stepBackward', label: 'Back one instruction (Alt+Left)', icon: ChevronLeft, backward: true, color: 'text-slate-400 hover:text-white' },
-];
-
-const FORWARD_BUTTONS: NavButton[] = [
-  { command: 'stepForward', label: 'Forward one instruction (Alt+Right)', icon: ChevronRight, backward: false, color: 'text-slate-400 hover:text-white' },
-  { command: 'stepOver', label: 'Step over: next line (F10)', icon: CornerDownRight, backward: false, color: 'text-sky-400 hover:text-sky-200' },
-  { command: 'stepInto', label: 'Step into function (F11)', icon: ArrowDownToLine, backward: false, color: 'text-sky-400 hover:text-sky-200' },
-  { command: 'stepOut', label: 'Step out of function (Shift+F11)', icon: ArrowUpFromLine, backward: false, color: 'text-sky-400 hover:text-sky-200' },
-  { command: 'continue', label: 'Continue to next breakpoint (F5)', icon: FastForward, backward: false, color: 'text-emerald-400 hover:text-emerald-200' },
-  { command: 'gotoEnd', label: 'Go to last step', icon: SkipForward, backward: false, color: 'text-slate-400 hover:text-white' },
-];
+const Kbd: React.FC<{ children: React.ReactNode; className?: string }> = ({ children, className = '' }) => (
+  <kbd aria-hidden className={`hidden md:inline rounded px-1 py-px font-mono text-[10px] font-normal ${className}`}>{children}</kbd>
+);
 
 export const Header: React.FC<HeaderProps> = ({
   onRun,
   onDebug,
-  onNavigate,
-  state,
-  isDebugging,
   isRecording,
   selectedExample,
   onSelectExample,
   examples,
-}) => {
-  const renderButton = ({ command, label, icon: Icon, backward, color }: NavButton) => (
-    <button
-      key={command}
-      onClick={() => onNavigate(command)}
-      disabled={!state || (backward ? state.isAtStart : state.isAtEnd)}
-      className={`p-1.5 ${color} disabled:opacity-30 rounded transition`}
-      title={label}
-      aria-label={label}
-    >
-      <Icon className="w-4 h-4" />
-    </button>
-  );
-
-  return (
-    <header className="h-14 bg-slate-900 border-b border-slate-800 px-4 flex items-center justify-between select-none">
-      {/* Brand */}
-      <div className="flex items-center space-x-3">
-        <div className="w-8 h-8 rounded-lg bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400">
-          <Code2 className="w-5 h-5" />
-        </div>
-        <div>
-          <h1 className="font-bold text-slate-100 text-sm tracking-wide flex items-center gap-2">
-            CodeTime
-            <span className="text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">
-              Time-Travel IDE
-            </span>
-          </h1>
-          <p className="text-[11px] text-slate-400 font-mono">v1.1.0 • VM Bytecode Engine</p>
-        </div>
+  onShare,
+  shareCopied,
+}) => (
+  <header className="h-12 shrink-0 bg-panel border-b border-line px-3 sm:px-4 flex items-center gap-3 sm:gap-4">
+    <div className="flex items-center gap-2.5 min-w-0">
+      <div className="w-[26px] h-[26px] shrink-0 rounded-md bg-fwd/15 flex items-center justify-center text-fwd">
+        <SquareCode className="w-4 h-4" aria-hidden />
       </div>
+      <h1 className="sr-only sm:not-sr-only text-sm font-semibold">CodeTime</h1>
+      <span className="hidden lg:inline text-xs text-fg-muted truncate">time-travel debugger</span>
+    </div>
 
-      {/* Controls & Stepping */}
-      <div className="flex items-center space-x-3">
-        {/* Main Actions */}
-        <div className="flex items-center space-x-1.5 bg-slate-950 p-1 rounded-lg border border-slate-800">
-          <button
-            onClick={onRun}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 rounded transition"
-            title="Run code to completion (Ctrl+Enter)"
-          >
-            <Play className="w-3.5 h-3.5 fill-current" />
-            Run
-          </button>
-          <button
-            onClick={onDebug}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-sky-400 hover:bg-sky-500/10 rounded transition"
-            title="Start time-travel debugging (F5)"
-          >
-            <Bug className="w-3.5 h-3.5" />
-            Debug
-          </button>
-        </div>
+    <div className="flex-1" />
 
-        {/* Time-Travel Navigation */}
-        {isRecording && (
-          <span className="flex items-center gap-1.5 text-xs text-sky-300">
-            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            Recording…
-          </span>
-        )}
-        {isDebugging && state && !isRecording && (
-          <div className="flex items-center space-x-0.5 bg-slate-950 p-1 rounded-lg border border-sky-500/30">
-            {BACKWARD_BUTTONS.map(renderButton)}
-            <span className="text-xs font-mono font-semibold px-2 text-sky-400 min-w-[90px] text-center" title="Current step / recorded steps">
-              {(state.currentStep + 1).toLocaleString('en-US')} / {state.totalSteps.toLocaleString('en-US')}
-            </span>
-            {FORWARD_BUTTONS.map(renderButton)}
-          </div>
-        )}
-      </div>
+    <div className="flex items-center gap-2">
+      <button
+        onClick={onRun}
+        disabled={isRecording}
+        className="flex items-center gap-1.5 rounded-md bg-run pl-3 pr-2 py-1.5 text-xs font-semibold text-app hover:brightness-110 disabled:opacity-60 transition"
+        title="Run to completion (Ctrl+Enter)"
+      >
+        <Play className="w-3.5 h-3.5 fill-current" aria-hidden />
+        Run
+        <Kbd className="bg-app/20">Ctrl ↵</Kbd>
+      </button>
+      <button
+        onClick={onDebug}
+        disabled={isRecording}
+        className="flex items-center gap-1.5 rounded-md border border-fwd/45 bg-fwd/10 pl-3 pr-2 py-1.5 text-xs font-semibold text-fwd hover:bg-fwd/20 disabled:opacity-60 transition"
+        title="Record the run and start at its first step (F5)"
+      >
+        {isRecording ? <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden /> : <Bug className="w-3.5 h-3.5" aria-hidden />}
+        Debug
+        <Kbd className="bg-app/40 text-fg-muted">F5</Kbd>
+      </button>
+    </div>
 
-      {/* Examples Selector */}
-      <div className="flex items-center space-x-2">
-        <Sparkles className="w-4 h-4 text-amber-400" />
+    <div className="flex-1" />
+
+    <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+      <label className="relative flex items-center min-w-0 rounded-md border border-line-strong bg-elevated text-xs hover:border-fg-muted transition">
+        <span className="hidden xl:inline pl-2.5 text-fg-muted">Example:</span>
         <select
           value={selectedExample}
           onChange={(e) => onSelectExample(e.target.value)}
-          className="bg-slate-950 text-slate-200 border border-slate-800 text-xs font-medium rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-sky-500 transition cursor-pointer"
+          aria-label="Example program"
+          className="appearance-none bg-transparent font-medium text-fg pl-2.5 xl:pl-1.5 pr-7 py-1.5 min-w-0 max-w-[160px] sm:max-w-[240px] truncate cursor-pointer focus:outline-none"
         >
           {examples.map((ex) => (
-            <option key={ex.name} value={ex.name}>
+            <option key={ex.name} value={ex.name} className="bg-elevated">
               {ex.label}
             </option>
           ))}
         </select>
-      </div>
-    </header>
-  );
-};
+        <ChevronDown className="pointer-events-none absolute right-2 w-3.5 h-3.5 text-fg-muted" aria-hidden />
+      </label>
+      <button
+        onClick={onShare}
+        className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-fg-2 hover:bg-hover hover:text-fg transition"
+        title="Copy a link that opens this program"
+      >
+        {shareCopied ? <Check className="w-3.5 h-3.5 text-run" aria-hidden /> : <Share2 className="w-3.5 h-3.5" aria-hidden />}
+        <span className="hidden sm:inline">{shareCopied ? 'Link copied' : 'Share'}</span>
+      </button>
+    </div>
+  </header>
+);

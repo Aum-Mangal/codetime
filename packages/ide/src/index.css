@@ -1,33 +1,115 @@
 @import "tailwindcss";
 
-/* ─── Base Resets ──────────────────────────────────────────────── */
+/*
+ * Design tokens. Same names and values as the "CodeTime" variable collection
+ * in the Figma design file, so `bg-panel`, `text-fg-muted`, `border-line` etc.
+ * map one-to-one onto the design.
+ */
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Fira Code', ui-monospace, monospace;
+
+  --color-app: #0a0e14;
+  --color-panel: #0f141c;
+  --color-elevated: #151b26;
+  --color-hover: #1b2230;
+  --color-selected: #1a2740;
+  --color-line: #1f2733;
+  --color-line-strong: #2a3443;
+
+  --color-fg: #e6eaf2;
+  --color-fg-2: #a3adbf;
+  --color-fg-muted: #6b7588;
+
+  /* Forward in time, and the primary accent. */
+  --color-fwd: #4db8ff;
+  /* Backward in time, and "you are here" in the recording. */
+  --color-back: #b794f6;
+  --color-run: #3dd68c;
+  --color-warn: #f5b942;
+  --color-err: #f2707a;
+
+  /* Event kinds: the scrubber, the event list and its legend. */
+  --color-ev-step: #3a4556;
+  --color-ev-assign: #4db8ff;
+  --color-ev-call: #b794f6;
+  --color-ev-return: #3dd68c;
+  --color-ev-print: #f5b942;
+  --color-ev-loop: #7c8cf8;
+  --color-ev-branch: #5ec4d6;
+  --color-ev-error: #f2707a;
+}
+
 html, body, #root {
   height: 100%;
   width: 100%;
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background-color: #020617;
-  color: #f8fafc;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: var(--color-app);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
-/* ─── Custom Scrollbars ────────────────────────────────────────── */
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: #090d16; }
-::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #334155; }
-
-/* ─── Monaco Active Line Decoration ───────────────────────────── */
-.debug-active-line {
-  background-color: rgba(56, 189, 248, 0.12) !important;
-  border-left: 3px solid #38bdf8 !important;
+:focus-visible {
+  outline: 2px solid var(--color-fwd);
+  outline-offset: 1px;
 }
 
-/* ─── Timeline fade animation ──────────────────────────────────── */
-@keyframes pulse-soft {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-line-strong); border-radius: 4px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--color-fg-muted); }
+
+/* ─── Monaco decorations ──────────────────────────────────────── */
+.ct-current-line {
+  background-color: color-mix(in srgb, var(--color-back) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--color-back);
 }
-.pulsing { animation: pulse-soft 1.5s ease-in-out infinite; }
+.ct-current-glyph::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  width: 0;
+  height: 0;
+  transform: translateY(-50%);
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 7px solid var(--color-back);
+}
+.ct-breakpoint,
+.ct-breakpoint-conditional {
+  cursor: pointer;
+}
+.ct-breakpoint::before,
+.ct-breakpoint-conditional::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translateY(-50%);
+  border-radius: 9999px;
+  background: var(--color-err);
+}
+.ct-breakpoint-conditional::before {
+  width: 8px;
+  height: 8px;
+  left: 6px;
+  border-radius: 1px;
+  background: var(--color-warn);
+  transform: translateY(-50%) rotate(45deg);
+}
+/* A breakpoint on the current line: show both. */
+.ct-current-glyph.ct-breakpoint::before,
+.ct-current-glyph.ct-breakpoint-conditional::before {
+  box-shadow: 0 0 0 2px var(--color-app), 0 0 0 4px var(--color-back);
+}
+.ct-inline-value {
+  color: var(--color-fg-muted) !important;
+  font-style: normal;
+  margin-left: 2ch;
+}

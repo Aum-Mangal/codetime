@@ -1,21 +1,42 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { DebuggerState, NavigationCommand, RecordingStats } from '@codetime/compiler';
 import { Header } from './components/Header';
-import { Editor } from './components/Editor';
+import { TransportBar } from './components/TransportBar';
+import { Editor, type LastChange } from './components/Editor';
+import { Tabs } from './components/Tabs';
 import { VariablesPanel } from './components/VariablesPanel';
 import { CallStackPanel } from './components/CallStackPanel';
 import { MemoryPanel } from './components/MemoryPanel';
-import { TimelinePanel } from './components/TimelinePanel';
+import { EventsPanel } from './components/EventsPanel';
 import { ConsolePanel } from './components/ConsolePanel';
-import { ErrorPanel } from './components/ErrorPanel';
+import { ProblemsPanel } from './components/ProblemsPanel';
+import { StatusBar } from './components/StatusBar';
 import { EXAMPLES, DEFAULT_EXAMPLE } from './examples';
-import type { BreakpointSpec, TimelineWindow, WorkerError, WorkerRequest, WorkerResponse } from './worker/protocol';
+import { decodeShareHash, encodeShareHash } from './share';
+import type {
+  BreakpointSpec,
+  Diagnostic,
+  RunOverviewMessage,
+  TimelineWindow,
+  WorkerError,
+  WorkerRequest,
+  WorkerResponse,
+} from './worker/protocol';
 
 /** A recording that has not answered by then is treated as hung and its worker is replaced. */
 const RECORD_TIMEOUT_MS = 15_000;
 const NOTICE_MS = 4_000;
+/** Delay between the last keystroke and the live compile check. */
+const CHECK_DEBOUNCE_MS = 250;
+const LAST_CHANGE_TIMEOUT_MS = 2_000;
+/** Selected in the example picker for a program opened from a share link. */
+const SHARED = 'shared';
 
 const EMPTY_TIMELINE: TimelineWindow = { start: 0, events: [] };
+const NO_VARIABLES: never[] = [];
+
+type InspectorTab = 'variables' | 'callstack' | 'stack';
+type BottomTab = 'console' | 'problems';
 
 export function App() {
   const [selectedExample, setSelectedExample] = useState(DEFAULT_EXAMPLE);
@@ -23,17 +44,27 @@ export function App() {
   const [debuggerState, setDebuggerState] = useState<DebuggerState | null>(null);
   const [timeline, setTimeline] = useState<TimelineWindow>(EMPTY_TIMELINE);
   const [stats, setStats] = useState<RecordingStats | null>(null);
+  const [overview, setOverview] = useState<RunOverviewMessage | null>(null);
   const [runtimeError, setRuntimeError] = useState<WorkerError | null>(null);
-  const [error, setError] = useState<WorkerError | null>(null);
+  const [recordError, setRecordError] = useState<WorkerError | null>(null);
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+  const [lastWriteLines, setLastWriteLines] = useState<Record<string, number>>({});
   const [notice, setNotice] = useState<string | null>(null);
-  const [isDebugging, setIsDebugging] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [activeTab, setActiveTab] = useState<'variables' | 'callstack' | 'memory'>('variables');
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('variables');
+  const [bottomTab, setBottomTab] = useState<BottomTab>('console');
   const [breakpoints, setBreakpoints] = useState<BreakpointSpec[]>([]);
+  const [shareCopied, setShareCopied] = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
   const watchdogRef = useRef<number | null>(null);
   const breakpointsRef = useRef<BreakpointSpec[]>([]);
+  const checkVersionRef = useRef(0);
+  const lastChangeRequestsRef = useRef(new Map<number, (result: LastChange | null) => void>());
+  const nextRequestIdRef = useRef(1);
+  const revealRef = useRef<((line: number, column: number) => void) | null>(null);
+
+  const isDebugging = debuggerState !== null;
 
   const post = useCallback((request: WorkerRequest) => {
     workerRef.current?.postMessage(request);
@@ -51,6 +82,14 @@ export function App() {
     window.setTimeout(() => setNotice((current) => (current === message ? null : current)), NOTICE_MS);
   }, []);
 
+  const endSession = useCallback(() => {
+    setDebuggerState(null);
+    setTimeline(EMPTY_TIMELINE);
+    setStats(null);
+    setOverview(null);
+    setRuntimeError(null);
+  }, []);
+
   /** Start a fresh worker. Breakpoints are re-sent because they live in the worker. */
   const spawnWorker = useCallback(() => {
     workerRef.current?.terminate();
@@ -62,27 +101,41 @@ export function App() {
         case 'STATE':
           clearWatchdog();
           setIsRecording(false);
-          setError(null);
+          setRecordError(null);
           setDebuggerState(message.state);
           setTimeline(message.timeline);
           setStats(message.stats);
           setRuntimeError(message.runtimeError);
+          setLastWriteLines(message.lastWriteLines);
           break;
+        case 'OVERVIEW':
+          setOverview(message.overview);
+          break;
+        case 'DIAGNOSTICS':
+          if (message.version === checkVersionRef.current) setDiagnostics(message.diagnostics);
+          break;
+        case 'LAST_CHANGE': {
+          const resolve = lastChangeRequestsRef.current.get(message.requestId);
+          lastChangeRequestsRef.current.delete(message.requestId);
+          resolve?.(message.step >= 0 ? { step: message.step, line: message.line } : null);
+          break;
+        }
         case 'NOTICE':
           showNotice(message.message);
           break;
         case 'ERROR':
           clearWatchdog();
           setIsRecording(false);
-          setError(message.error);
-          setIsDebugging(false);
+          setRecordError(message.error);
+          endSession();
+          setBottomTab(/Syntax|Parse|Semantic|Lex|Compile/.test(message.error.kind) ? 'problems' : 'console');
           break;
       }
     };
 
     workerRef.current = worker;
     worker.postMessage({ type: 'SET_BREAKPOINTS', breakpoints: breakpointsRef.current } satisfies WorkerRequest);
-  }, [clearWatchdog, showNotice]);
+  }, [clearWatchdog, showNotice, endSession]);
 
   useEffect(() => {
     spawnWorker();
@@ -92,6 +145,22 @@ export function App() {
     };
   }, [spawnWorker, clearWatchdog]);
 
+  // Open a program from a share link.
+  useEffect(() => {
+    void decodeShareHash(window.location.hash).then((shared) => {
+      if (shared === null) return;
+      setCode(shared);
+      setSelectedExample(SHARED);
+    });
+  }, []);
+
+  // Live diagnostics while typing.
+  useEffect(() => {
+    const version = ++checkVersionRef.current;
+    const timer = window.setTimeout(() => post({ type: 'CHECK', source: code, version }), CHECK_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [code, post]);
+
   const updateBreakpoints = useCallback((next: BreakpointSpec[]) => {
     breakpointsRef.current = next;
     setBreakpoints(next);
@@ -99,39 +168,57 @@ export function App() {
   }, [post]);
 
   const record = useCallback((startAt: 'start' | 'end') => {
-    setIsDebugging(true);
     setIsRecording(true);
+    setRecordError(null);
     clearWatchdog();
     watchdogRef.current = window.setTimeout(() => {
       // The worker is stuck inside a long synchronous recording; replace it.
       spawnWorker();
       setIsRecording(false);
-      setIsDebugging(false);
-      setError({
+      endSession();
+      setRecordError({
         message: 'Recording timed out',
         line: 1,
         column: 1,
         formatted: `Recording did not finish within ${RECORD_TIMEOUT_MS / 1000} seconds and was stopped.`,
         kind: 'Timeout',
       });
+      setBottomTab('console');
     }, RECORD_TIMEOUT_MS);
+    // Check first, so Problems is current even if Run follows a keystroke immediately.
+    post({ type: 'CHECK', source: code, version: ++checkVersionRef.current });
     post({ type: 'RECORD', source: code, startAt });
-  }, [code, post, spawnWorker, clearWatchdog]);
+    setBottomTab('console');
+  }, [code, post, spawnWorker, clearWatchdog, endSession]);
+
+  const handleCodeChange = useCallback((next: string) => {
+    setCode(next);
+    // The recording no longer matches the source.
+    if (debuggerState) endSession();
+  }, [debuggerState, endSession]);
 
   const handleSelectExample = (name: string) => {
-    setSelectedExample(name);
     const ex = EXAMPLES.find((e) => e.name === name);
-    if (ex) {
-      setCode(ex.code);
-      setError(null);
-      setDebuggerState(null);
-      setTimeline(EMPTY_TIMELINE);
-      setStats(null);
-      setRuntimeError(null);
-      setIsDebugging(false);
-      updateBreakpoints([]);
-    }
+    if (!ex) return;
+    setSelectedExample(name);
+    setCode(ex.code);
+    setRecordError(null);
+    endSession();
+    updateBreakpoints([]);
+    if (window.location.hash) history.replaceState(null, '', window.location.pathname + window.location.search);
   };
+
+  const handleShare = useCallback(async () => {
+    const hash = await encodeShareHash(code);
+    history.replaceState(null, '', hash);
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 2_000);
+    } catch {
+      showNotice('The link is in the address bar; copying to the clipboard was not allowed.');
+    }
+  }, [code, showNotice]);
 
   const handleRun = useCallback(() => record('end'), [record]);
   const handleDebug = useCallback(() => record('start'), [record]);
@@ -142,6 +229,15 @@ export function App() {
     [post],
   );
 
+  const queryLastChange = useCallback((name: string) => new Promise<LastChange | null>((resolve) => {
+    const requestId = nextRequestIdRef.current++;
+    lastChangeRequestsRef.current.set(requestId, resolve);
+    post({ type: 'LAST_CHANGE', requestId, name });
+    window.setTimeout(() => {
+      if (lastChangeRequestsRef.current.delete(requestId)) resolve(null);
+    }, LAST_CHANGE_TIMEOUT_MS);
+  }), [post]);
+
   const handleToggleBreakpoint = useCallback((line: number) => {
     const current = breakpointsRef.current;
     updateBreakpoints(current.some((b) => b.line === line)
@@ -149,17 +245,9 @@ export function App() {
       : [...current, { line }]);
   }, [updateBreakpoints]);
 
-  const handleEditBreakpointCondition = useCallback((line: number) => {
-    const current = breakpointsRef.current;
-    const existing = current.find((b) => b.line === line);
-    const input = window.prompt(
-      `Break on line ${line} only when this CodeTime expression is true (leave empty to always break):`,
-      existing?.condition ?? '',
-    );
-    if (input === null) return;
-    const condition = input.trim();
-    const updated: BreakpointSpec = condition ? { line, condition } : { line };
-    updateBreakpoints([...current.filter((b) => b.line !== line), updated]);
+  const handleUpdateBreakpoint = useCallback((line: number, spec: BreakpointSpec | null) => {
+    const others = breakpointsRef.current.filter((b) => b.line !== line);
+    updateBreakpoints(spec ? [...others, spec] : others);
   }, [updateBreakpoints]);
 
   // Keyboard shortcuts (VS Code style; Shift reverses direction).
@@ -186,113 +274,136 @@ export function App() {
   }, [isDebugging, handleRun, handleDebug, navigate]);
 
   const snapshot = debuggerState?.snapshot;
-  const activeLine = snapshot?.sourceLine;
+  const frames = snapshot?.frames ?? [];
+  const topFrame = frames[frames.length - 1];
+  const locals = topFrame?.locals ?? NO_VARIABLES;
+  const globals = snapshot?.globals ?? NO_VARIABLES;
   const atErrorStep = Boolean(runtimeError && debuggerState?.isAtEnd);
+  const errorCount = diagnostics.filter((d) => d.severity === 'error').length;
+  const examples = selectedExample === SHARED ? [{ name: SHARED, label: 'Shared program' }, ...EXAMPLES] : EXAMPLES;
+
+  const consoleError = recordError
+    ? `Could not run: ${recordError.kind} at line ${recordError.line}, column ${recordError.column}\n\n${recordError.formatted}`
+    : atErrorStep ? runtimeError?.formatted : undefined;
 
   return (
-    <div className="h-screen w-screen flex flex-col bg-slate-950 text-slate-100 overflow-hidden font-sans">
+    <div className="h-screen w-screen flex flex-col bg-app text-fg overflow-hidden">
       <Header
         onRun={handleRun}
         onDebug={handleDebug}
-        onNavigate={navigate}
-        state={debuggerState}
-        isDebugging={isDebugging}
         isRecording={isRecording}
         selectedExample={selectedExample}
         onSelectExample={handleSelectExample}
-        examples={EXAMPLES}
+        examples={examples}
+        onShare={() => void handleShare()}
+        shareCopied={shareCopied}
+      />
+
+      <TransportBar
+        state={debuggerState}
+        overview={overview}
+        isRecording={isRecording}
+        onNavigate={navigate}
+        onGotoStep={handleGotoStep}
       />
 
       {notice && (
-        <div role="status" className="px-4 py-1.5 text-xs bg-amber-500/10 text-amber-200 border-b border-amber-500/30">
+        <div role="status" className="shrink-0 px-4 py-1.5 text-xs bg-warn/10 text-warn border-b border-warn/30">
           {notice}
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Code Editor */}
-        <div className="flex-1 flex flex-col border-r border-slate-800">
-          <div className="flex-1">
+      <main className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        <div className="flex-1 min-h-0 min-w-0 flex flex-col lg:border-r border-line">
+          <div className="flex-1 min-h-[200px]">
             <Editor
               value={code}
-              onChange={setCode}
-              activeLine={activeLine}
-              isDebugging={isDebugging}
-              onToggleBreakpoint={handleToggleBreakpoint}
-              onEditBreakpointCondition={handleEditBreakpointCondition}
+              onChange={handleCodeChange}
+              activeLine={snapshot?.sourceLine}
               breakpoints={breakpoints}
+              onToggleBreakpoint={handleToggleBreakpoint}
+              onUpdateBreakpoint={handleUpdateBreakpoint}
+              diagnostics={diagnostics}
+              locals={locals}
+              globals={globals}
+              lastWriteLines={lastWriteLines}
+              onQueryLastChange={queryLastChange}
+              revealRef={revealRef}
             />
           </div>
 
-          <div className="h-44 border-t border-slate-800">
-            <ConsolePanel
-              output={snapshot ? snapshot.output : []}
-              error={atErrorStep ? runtimeError?.formatted : undefined}
+          <section className="h-32 sm:h-44 shrink-0 flex flex-col border-t border-line bg-panel" aria-label="Output">
+            <Tabs<BottomTab>
+              label="Output"
+              active={bottomTab}
+              onChange={setBottomTab}
+              tabs={[
+                { id: 'console', label: 'Console' },
+                {
+                  id: 'problems',
+                  label: 'Problems',
+                  badge: (
+                    <span className={`rounded-full px-1.5 text-[10px] ${errorCount ? 'bg-err/15 text-err' : 'bg-hover text-fg-muted'}`}>
+                      {diagnostics.length}
+                    </span>
+                  ),
+                },
+              ]}
             />
-          </div>
+            <div className="flex-1 min-h-0">
+              {bottomTab === 'console' ? (
+                <ConsolePanel output={snapshot ? snapshot.output : []} error={consoleError} />
+              ) : (
+                <ProblemsPanel diagnostics={diagnostics} onReveal={(line, column) => revealRef.current?.(line, column)} />
+              )}
+            </div>
+          </section>
         </div>
 
-        {/* Right: Debugger Panels */}
-        <div className="w-[380px] flex flex-col bg-slate-900">
-          <div className="flex items-center bg-slate-950 border-b border-slate-800">
-            <button
-              onClick={() => setActiveTab('variables')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition ${
-                activeTab === 'variables'
-                  ? 'border-sky-400 text-sky-300 bg-slate-900'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Variables
-            </button>
-            <button
-              onClick={() => setActiveTab('callstack')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition ${
-                activeTab === 'callstack'
-                  ? 'border-purple-400 text-purple-300 bg-slate-900'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Call Stack ({snapshot ? snapshot.frames.length : 0})
-            </button>
-            <button
-              onClick={() => setActiveTab('memory')}
-              className={`flex-1 py-2 text-xs font-semibold border-b-2 transition ${
-                activeTab === 'memory'
-                  ? 'border-amber-400 text-amber-300 bg-slate-900'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Operand Stack
-            </button>
+        <aside className="h-[45%] lg:h-auto lg:w-[400px] shrink-0 flex flex-col bg-panel border-t lg:border-t-0 border-line" aria-label="Debugger">
+          <div className="flex-1 min-h-0 flex flex-col">
+            <Tabs<InspectorTab>
+              label="Inspector"
+              active={inspectorTab}
+              onChange={setInspectorTab}
+              tabs={[
+                { id: 'variables', label: 'Variables' },
+                {
+                  id: 'callstack',
+                  label: 'Call stack',
+                  badge: frames.length > 0 ? <span className="text-fg-muted">{frames.length}</span> : undefined,
+                },
+                { id: 'stack', label: 'VM stack' },
+              ]}
+            />
+            <div className="flex-1 min-h-0" role="tabpanel" aria-labelledby={`tab-${inspectorTab}`}>
+              {inspectorTab === 'variables' ? (
+                <VariablesPanel
+                  locals={locals}
+                  globals={globals}
+                  functionName={topFrame && topFrame.fnName !== 'main' ? topFrame.fnName : undefined}
+                  onFindChange={isDebugging ? handleFindChange : undefined}
+                />
+              ) : inspectorTab === 'callstack' ? (
+                <CallStackPanel frames={frames} />
+              ) : (
+                <MemoryPanel stackDisplay={snapshot ? snapshot.stackDisplay : []} />
+              )}
+            </div>
           </div>
 
-          <div className="flex-1 overflow-hidden p-2">
-            {error ? (
-              <ErrorPanel error={error} />
-            ) : activeTab === 'variables' ? (
-              <VariablesPanel
-                locals={snapshot ? snapshot.frames[snapshot.frames.length - 1]?.locals || [] : []}
-                globals={snapshot ? snapshot.globals : []}
-                onFindChange={isDebugging && snapshot ? handleFindChange : undefined}
-              />
-            ) : activeTab === 'callstack' ? (
-              <CallStackPanel frames={snapshot ? snapshot.frames : []} />
-            ) : (
-              <MemoryPanel stackDisplay={snapshot ? snapshot.stackDisplay : []} />
-            )}
-          </div>
-
-          <div className="h-44">
-            <TimelinePanel
+          <div className="h-[40%] min-h-[160px] shrink-0 border-t border-line">
+            <EventsPanel
               timeline={timeline}
               stats={stats}
               currentStep={debuggerState ? debuggerState.currentStep : 0}
               onGotoStep={handleGotoStep}
             />
           </div>
-        </div>
-      </div>
+        </aside>
+      </main>
+
+      <StatusBar state={debuggerState} stats={stats} isRecording={isRecording} errorCount={errorCount} />
     </div>
   );
 }

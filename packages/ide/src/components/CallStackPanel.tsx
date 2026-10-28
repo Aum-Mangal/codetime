@@ -1,59 +1,45 @@
 import React from 'react';
-import { FrameSnapshot } from '@codetime/compiler';
-import { Layers } from 'lucide-react';
+import type { FrameSnapshot } from '@codetime/compiler';
 
 export interface CallStackPanelProps {
   frames: FrameSnapshot[];
 }
 
-export const CallStackPanel: React.FC<CallStackPanelProps> = ({ frames }) => {
-  return (
-    <div className="h-full flex flex-col bg-slate-900 text-xs font-mono select-text overflow-hidden">
-      <div className="px-3 py-2 bg-slate-950 border-b border-slate-800 font-bold text-slate-300 flex items-center gap-2">
-        <Layers className="w-4 h-4 text-purple-400" />
-        Call Stack
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-3">
-        {frames.length === 0 ? (
-          <p className="text-slate-500 italic text-[11px] pl-2">No active call frames</p>
-        ) : (
-          <div className="space-y-1.5">
-            {[...frames].reverse().map((frame, index) => {
-              const isTop = index === 0;
-              return (
-                <div
-                  key={frame.id}
-                  className={`px-3 py-2 rounded-lg border transition ${
-                    isTop
-                      ? 'bg-purple-950/40 border-purple-500/40 text-purple-200'
-                      : 'bg-slate-950 border-slate-800 text-slate-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-xs flex items-center gap-1.5">
-                      {isTop && <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse" />}
-                      {frame.fnName || 'anonymous'}()
+export const CallStackPanel: React.FC<CallStackPanelProps> = ({ frames }) => (
+  <div className="h-full overflow-y-auto p-2 select-text">
+    {frames.length === 0 ? (
+      <p className="px-3 py-6 text-center text-xs text-fg-muted">The call stack appears here while you debug.</p>
+    ) : (
+      <ol className="space-y-1">
+        {[...frames].reverse().map((frame, index) => {
+          const isTop = index === 0;
+          return (
+            <li
+              key={frame.id}
+              className={`rounded-md border px-3 py-2 ${isTop ? 'border-back/40 bg-back/10' : 'border-line bg-app'}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className={`flex items-center gap-1.5 font-mono text-xs font-medium ${isTop ? 'text-fg' : 'text-fg-2'}`}>
+                  {isTop && <span className="h-1.5 w-1.5 rounded-full bg-back" aria-label="current frame" />}
+                  {frame.fnName === 'main' ? '<script>' : `${frame.fnName || 'anonymous'}()`}
+                </span>
+                <span className="font-mono text-[10px] text-fg-muted">
+                  Ln {frame.loc.line}, Col {frame.loc.column}
+                </span>
+              </div>
+              {frame.locals.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {frame.locals.map((l, i) => (
+                    <span key={i} className="max-w-full truncate rounded border border-line bg-panel px-1.5 py-px font-mono text-[10px] text-fg-2">
+                      {l.name} = {l.displayValue}
                     </span>
-                    <span className="text-[10px] text-slate-400 font-mono">
-                      line {frame.loc.line}:{frame.loc.column}
-                    </span>
-                  </div>
-                  {frame.locals.length > 0 && (
-                    <div className="mt-1.5 text-[11px] text-slate-400 flex flex-wrap gap-1">
-                      {frame.locals.map((l, i) => (
-                        <span key={i} className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px]">
-                          {l.name} = {l.displayValue}
-                        </span>
-                      ))}
-                    </div>
-                  )}
+                  ))}
                 </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-};
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    )}
+  </div>
+);
