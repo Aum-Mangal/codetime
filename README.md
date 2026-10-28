@@ -31,9 +31,15 @@ Measured with `npm run bench` on a single ~25-line program (recursive Fibonacci 
 | **Semantic Scope Analysis** | 2,000 runs | **150,000+ ops/sec** | ~0.006 ms / run |
 | **Bytecode Compilation** | 2,000 runs | **95,000+ ops/sec** | ~0.01 ms / run |
 | **VM Execution (Full Program)** | 1,000 runs | **7,500+ runs/sec** | ~0.13 ms / run |
-| **Time-Travel Snapshot Recording** | 100 runs | **150,000+ steps/sec** | ~0.006 ms / step (small program state) |
+| **Time-Travel Recording** | 100 runs | **1,700,000+ steps/sec** | ~0.0006 ms / step |
 
-> Recording speed depends on program size: each step currently copies the full program state, so a loop that builds a 5,000-element array records at only ~6,000 steps/sec and uses ~3 GB. A checkpoint + replay recorder is the planned fix.
+The debugger has its own benchmark (`npm run bench:replay`) for a loop that pushes N items into an array. These are the numbers before and after the checkpoint + replay rewrite:
+
+| Items pushed | Steps | Snapshot per step (v1.1) | Checkpoint + replay | Seek to any step (p99) |
+|---:|---:|---:|---:|---:|
+| 500 | 9,016 | 146 ms, 41 MB | 19 ms, 0.5 MB | 1.8 ms |
+| 5,000 | 90,016 | 12.6 s, 3.1 GB | 89 ms, 1.9 MB | 1.6 ms |
+| 20,000 | 360,016 | over the step cap | 270 ms, 14.1 MB | 5.3 ms |
 
 ---
 
@@ -42,10 +48,11 @@ Measured with `npm run bench` on a single ~25-line program (recursive Fibonacci 
 **CodeTime** is a programming language and developer environment designed from the ground up to make debugging intuitive, visual, and non-destructive.
 
 In most everyday debugging you can only step forward: step past the interesting moment and you have to restart. Reverse debugging exists in tools like gdb (`reverse-step`), rr and WinDbg TTD, but it usually needs special setup. CodeTime builds it into the language:
-- The debugger records a state snapshot after every bytecode instruction.
-- You can step backward and forward, or jump to any recorded step, without re-running the program.
-- An execution timeline shows every recorded event; click any event to jump to it.
-- Variables, call stack frames, and the VM operand stack are shown for whichever step you are on.
+- The debugger records a run once, on the same VM the CLI uses, then lets you move through it in both directions.
+- Step by instruction or by line (into, over, out) forward **and backward**, and run back to the previous breakpoint.
+- Breakpoints can have conditions (`lo == hi`); a condition is evaluated on a copy of the program state, so it cannot change the run.
+- Ask "when did this variable last change?" and jump straight to that step, including changes through `arr[i] = x` or `arr.push(x)`.
+- Variables, captured variables, call stack frames and the operand stack are shown for whichever step you are on.
 
 The project is structured as a TypeScript monorepo featuring a full compiler pipeline, a bytecode virtual machine, a command-line interface (CLI), and a modern browser-based IDE powered by Monaco Editor and Web Workers.
 
@@ -63,8 +70,17 @@ Binary operators are parsed with precedence climbing (the binary-operator core o
 ### 2. A bytecode VM instead of a tree-walking interpreter
 The compiler turns the AST into a flat array of opcodes in a single pass, and the VM runs them in one dispatch loop over an operand stack. Bytecode gives the debugger a natural unit of execution (one instruction = one step) and an instruction pointer to record. I have not benchmarked it against a tree-walking interpreter, so I make no speed claim here.
 
-### 3. Snapshot history for time travel
-Many opcodes destroy information (an assignment overwrites the old value), so you cannot simply run instructions backward. Instead the debugger records a snapshot of program state after each instruction: moving to any step is then an O(1) array lookup. The cost is memory, which grows with steps × program state; the planned fix is periodic checkpoints plus replay (the approach used by rr).
+### 3. Record and replay with checkpoints for time travel
+Many opcodes destroy information (an assignment overwrites the old value), so you cannot simply run instructions backward. The first version stored a full snapshot of program state after every instruction: seeking was O(1), but a 90,000-step program needed 3.1 GB.
+
+The debugger now works like rr. It drives the real, resumable VM one `step()` at a time and keeps:
+- a 20-byte-per-step event log in typed arrays (line, call depth, event kind, variable written);
+- a full, identity-preserving copy of the VM state every 1,000 steps.
+
+To show step n, it restores the nearest checkpoint and re-executes the gap. The VM is deterministic, so the result is exact; a test compares every step against a run with no checkpoints. Line stepping, reverse stepping, breakpoints and watchpoints are scans of the event log, so only the step finally shown is replayed. The trade-off: seeking costs up to 1,000 instructions (about 2 ms) instead of O(1), in exchange for over 1,000× less memory.
+
+### 4. Debug info for variable names
+Stack slots are reused by sibling blocks, so a slot number does not identify a variable. The compiler records each local's live range (first and last instruction it occupies its slot), similar in spirit to DWARF location lists. The debugger shows a local only inside its range, under its own name.
 
 ---
 
@@ -76,16 +92,20 @@ Many opcodes destroy information (an assignment overwrites the old value), so yo
   - **Semantic Analyzer**: Scope resolution, arity checks for functions and structs, loop/function context checks, and shadowing warnings.
   - **Bytecode Compiler**: Single-pass code generator emitting bytecode chunks, constant pools, and line maps.
   - **Virtual Machine**: Stack-based execution engine with call frames, closures, an instruction budget, and runtime type checks.
-- **Time-Travel Debugger Engine**:
-  - `stepForward` / `stepBackward` — Step by single bytecode instruction.
-  - `stepOver` — Step over function calls while tracking nested state.
-  - `continueToBreakpoint` — Run forward to the next line breakpoint.
-  - `gotoStep` — Jump to any recorded step (an O(1) lookup).
+- **Time-Travel Debugger Engine** (record and replay, see [docs/DEBUGGER.md](docs/DEBUGGER.md)):
+  - `stepInto` / `stepOver` / `stepOut` and `reverseStepInto` / `reverseStepOver` / `reverseStepOut`: line-level stepping in both directions.
+  - `continueToBreakpoint` / `reverseContinue`: run to the next or previous breakpoint hit; breakpoints may have conditions.
+  - `findChange(name, direction)`: jump to the step that last (or next) wrote a variable.
+  - `stepForward` / `stepBackward` / `gotoStep`: instruction-level movement.
+  - Bounded memory: 20 bytes per step plus at most 200 checkpoints; very long runs are marked as truncated instead of silently cut off.
 - **Browser IDE (`packages/ide`)**:
   - **Monaco Editor** with custom Monarch syntax highlighting and theme.
   - Background **Web Worker** execution thread so the UI remains completely fluid and responsive.
-  - **Execution Timeline Panel** listing every recorded event; click one to jump to it.
+  - Forward and reverse stepping controls with VS Code-style shortcuts (Shift reverses direction).
+  - Conditional breakpoints (right-click a breakpoint) and a "last change" button on every variable.
+  - **Execution Timeline Panel** showing the events around the current step and the recording's size.
   - Live inspection panels for **Variables**, **Call Stack**, and **Operand Stack**.
+  - Typed worker protocol; each message carries one step's state, never the whole run.
 - **Developer CLI (`packages/cli`)**:
   - `codetime run <file>` — Run CodeTime source files.
   - `codetime tokens <file>` — Inspect lexer token stream.
@@ -93,7 +113,7 @@ Many opcodes destroy information (an assignment overwrites the old value), so yo
   - `codetime compile <file>` — Disassemble bytecode instructions.
   - `codetime eval "<code>"` — Evaluate code snippets interactively.
 - **Automated Verification**:
-  - 261 unit, integration and regression tests (Vitest), run in CI on Linux and Windows with Node 20 and 22.
+  - 285 unit, integration and regression tests (Vitest), run in CI on Linux and Windows with Node 20 and 22, including a differential test that compares replayed state with an uncheckpointed run at every step.
 
 ---
 
@@ -115,7 +135,7 @@ cd codetime
 npm install
 npm run build
 
-# Run full test suite (261 tests across 8 test files)
+# Run full test suite (285 tests across 8 test files)
 npm test
 
 # Run performance benchmarks
@@ -190,8 +210,8 @@ codetime/
 │   │   │   ├── semantic/    Scope hierarchy & semantic verification
 │   │   │   ├── codegen/     Bytecode compiler & disassembler
 │   │   │   ├── vm/          Stack Virtual Machine runtime
-│   │   │   └── debugger/    Time-travel snapshot recorder & navigation engine
-│   │   ├── tests/           Vitest unit, integration & regression suites (261 tests)
+│   │   │   └── debugger/    Record-and-replay debugger: trace, checkpoints, navigation
+│   │   ├── tests/           Vitest unit, integration & regression suites (285 tests)
 │   │   └── benchmarks/      Throughput benchmark suite
 │   ├── cli/              Node.js CLI executable tool (codetime)
 │   └── ide/              React + Vite + Monaco + Web Worker Visual Time-Travel IDE

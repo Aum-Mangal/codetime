@@ -1,6 +1,6 @@
 # CodeTime — Architecture Document
 
-**Version 1.0** | Technical description of the CodeTime compiler, VM, and debugger architecture.
+**Version 1.1** | Technical description of the CodeTime compiler, VM, and debugger architecture.
 
 ---
 
@@ -163,89 +163,52 @@ Each instruction also carries a `sourceIndex` — an index into the source map, 
 
 **File:** `packages/compiler/src/vm/`
 
-Stack-based VM. The bytecode design (opcode set, call frames, open/closed upvalues for closures) follows the clox VM from Robert Nystrom's *Crafting Interpreters*; CodeTime's additions are the debugger, struct and default-parameter support, and the IDE.
+Stack-based VM. The bytecode design (opcode set, call frames, open/closed upvalues for closures) follows the clox VM from Robert Nystrom's *Crafting Interpreters*; CodeTime's additions are the record-and-replay debugger, structs, default parameters and the IDE.
 
 ### Data Structures
 
 ```
 VM {
-  chunk: Chunk           // bytecode + constants
-  ip: number             // instruction pointer (index into chunk.code)
-  stack: Value[]         // operand stack
-  frames: CallFrame[]    // call stack
-  globals: Map<string, Value>  // global variables
+  stack: Value[]                // operand stack; locals live in their frame's slots
+  frames: CallFrame[]           // call stack
+  globals: Map<string, Value>
+  openUpvalues: Upvalue[]       // captured variables still on the stack
+  output: string[]              // printed lines
+  status: 'ready' | 'running' | 'halted' | 'error'
 }
 
-CallFrame {
-  fn: FunctionValue      // the function being executed
-  ip: number             // return address (IP when CALL was made)
-  stackBase: number      // index into VM.stack where this frame's locals start
-  locals: Map<string, Value>   // local variables in this frame
-}
-
-Value = integer | float | string | boolean | null | ArrayValue | ObjectValue | FunctionValue
+CallFrame { closure: ClosureValue; ip: number; slots: number }   // slots = stack base
+Upvalue   { location: number; isClosed: boolean; closed: Value } // open → stack slot, closed → own copy
 ```
+
+`Upvalue.isClosed` is a separate flag because `null` is a real CodeTime value and cannot also mean "still open".
 
 ### Execution
 
-The VM runs in a tight loop, fetching and dispatching instructions by type. Each `CALL` instruction:
-1. Pops `argc` arguments off the stack
-2. Creates a new `CallFrame` with those arguments bound to parameter names
-3. Sets `ip` to the function's bytecode start
+The VM is **resumable**: `load(chunk)` prepares the main script, `execute(n)` runs up to n instructions, and `step()` runs exactly one. `run(chunk)` (used by the CLI) is `load` plus `execute(Infinity)`, guarded by an instruction budget. Errors become a `RuntimeError` with a call stack and stop the VM with `status = 'error'` instead of throwing.
 
-`RETURN` pops the frame, restores the previous `ip`, and pushes the return value.
+Builtins are stateless functions shared by every VM (`natives.ts`). Per-call state comes in through a context: `print` writes through it, and bound methods such as `arr.push` carry their array in a `receiver` field instead of a JavaScript closure. This keeps all program state inside VM fields, which makes snapshots possible.
 
 ---
 
 ## Time-Travel Debugger
 
-**File:** `packages/compiler/src/debugger/`
+**File:** `packages/compiler/src/debugger/` (full description in [DEBUGGER.md](DEBUGGER.md))
 
-### Strategy: Full Snapshot per Step
+The debugger does not interpret bytecode. It drives the VM above one `step()` at a time and stores:
 
-After each executed instruction, the debugger takes a **full deep copy** of the relevant VM state:
+- a **trace**: 20 bytes per step in typed arrays (line, column, call depth, event kind, variable written, output length, line-start flag);
+- a **checkpoint**: an identity-preserving deep copy of the full VM state, every K steps (default 1,000), thinned out once there are more than 200.
 
-```typescript
-interface ExecutionSnapshot {
-  stepIndex: number;
-  ip: number;
-  sourceLoc: SourceLocation;
-  stack: Value[];
-  frames: FrameSnapshot[];
-  globals: Record<string, Value>;
-  output: string[];           // accumulated print output up to this step
-  event: StepEvent;           // what just happened (assignment, call, return, etc.)
-}
+To show step n it restores the nearest checkpoint before n into a scratch VM and replays the gap. Replay is exact because the VM is deterministic. Line stepping (forward and reverse), breakpoints and "last write to x" watchpoints are scans over the trace, so only the final step is replayed.
 
-interface FrameSnapshot {
-  fnName: string;
-  locals: Record<string, Value>;
-  ip: number;
-}
-```
+| | Before (snapshot per step) | Now (checkpoint + replay) |
+|---|---|---|
+| Memory | O(steps × state) | O(20 B × steps + checkpoints × state) |
+| Seek | O(1) | O(K) instructions |
+| 5,000-push loop (90k steps) | 12.6 s, 3.1 GB | 89 ms, 1.9 MB retained |
 
-The snapshot array is stored in `Debugger.history: ExecutionSnapshot[]`.
-
-### Navigation
-
-| Operation | Implementation |
-|-----------|----------------|
-| Step forward | Execute one instruction, append snapshot |
-| Step backward | Decrement current step index, return snapshot |
-| Jump to step N | Return `history[N]` |
-| Restart | Reset current step to 0, return `history[0]` |
-
-**Complexity:** Step backward and jump-to are O(1) — no replay needed. The tradeoff is memory: every step stores a full copy of program state, so recording memory is O(steps x state size). Measured: a loop pushing 500 items (8k steps) uses ~41 MB; 5,000 items (80k steps) uses ~3 GB. A checkpoint + replay recorder fixes this and is the next planned change.
-
-### State Restoration
-
-When the UI navigates to step N, it receives `history[N]` and reconstructs:
-- Variable panel: `frames[0].locals` + `globals`
-- Call stack panel: `frames.map(f => f.fnName)`
-- Source highlighting: `sourceLoc.line`
-- Timeline: the `event` field for each step
-
-No re-execution is needed. The previous state is exactly restored by reading the snapshot.
+Variable names come from compiler debug info: each local has the instruction range in which it occupies its stack slot (`Chunk.debug.locals`), so reused slots are named correctly.
 
 ---
 
@@ -260,36 +223,38 @@ Built with React + Vite + TypeScript.
 ```
 IDE (React)
 ├── Worker (Web Worker)
-│   └── @codetime/compiler — VM + Debugger runs here
+│   └── @codetime/compiler — compile + record + replay run here
 │       (off the main thread; UI stays responsive)
 │
-├── CodeEditor (Monaco Editor)
+├── Editor (Monaco)
 │   ├── Custom Monarch tokenizer for CodeTime syntax
-│   ├── Line decoration for current step highlighting
-│   └── Error markers from semantic analyzer
+│   ├── Current-line decoration
+│   └── Breakpoint glyphs (click: toggle, right-click: condition)
 │
-├── DebugControls — Run / Pause / Step / Step Back / Restart / End
-├── VariablesPanel — Displays current frame locals + globals
-├── CallStackPanel — Function call hierarchy
-├── TimelinePanel — Clickable execution history
-└── MemoryPanel — Stack frame visualization
+├── Header — Run / Debug, forward and reverse stepping, continue / reverse continue
+├── VariablesPanel — locals (by live range), captured variables, globals, "last change" buttons
+├── CallStackPanel — function call hierarchy
+├── TimelinePanel — events around the current step + recording stats
+└── MemoryPanel — operand stack
 ```
 
 ### Worker Protocol
 
-Messages sent to the worker:
-- `{ type: 'RUN', source: string }` — run without debug
-- `{ type: 'DEBUG', source: string }` — run with full history capture
-- `{ type: 'STEP_FORWARD' }` — advance one step
-- `{ type: 'STEP_BACKWARD' }` — go back one step
-- `{ type: 'GOTO', stepIndex: number }` — jump to step
-- `{ type: 'RESTART' }` — go to step 0
+The message types are defined once in `packages/ide/src/worker/protocol.ts` and used by both sides.
 
-Messages received from the worker:
-- `{ type: 'SNAPSHOT', snapshot: ExecutionSnapshot }` — state update
-- `{ type: 'OUTPUT', text: string }` — print output
-- `{ type: 'ERROR', error: CompileError | RuntimeError }` — error event
-- `{ type: 'DONE', totalSteps: number }` — execution complete
+To the worker:
+- `{ type: 'RECORD', source, startAt: 'start' | 'end' }`: compile and record (Debug / Run)
+- `{ type: 'NAVIGATE', command }`: any `NavigationCommand` (`stepOver`, `reverseContinue`, ...)
+- `{ type: 'GOTO_STEP', step }`
+- `{ type: 'FIND_CHANGE', name, direction }`: jump to the previous / next write of a variable
+- `{ type: 'SET_BREAKPOINTS', breakpoints }`: replace all breakpoints (`{ line, condition? }`)
+
+From the worker:
+- `{ type: 'STATE', state, timeline: { start, events }, stats, runtimeError }`: the current step, with a window of about 120 events, never the whole run
+- `{ type: 'NOTICE', message }`: e.g. "'x' is not written before this step"
+- `{ type: 'ERROR', error }`: compile error or failure
+
+If a recording has not answered after 15 seconds, the UI terminates the worker, starts a fresh one and re-sends the breakpoints.
 
 ---
 
@@ -301,13 +266,13 @@ Messages received from the worker:
 - In Node.js CLI: the VM runs in the same process but is a pure computation engine with no native bindings
 - Objects are backed by `Map`, never plain JS objects, so programs cannot reach or pollute JavaScript prototypes
 - Resource limits: an instruction budget (default 10M, `--max-steps` in the CLI) stops infinite loops, call depth is capped at 256 frames, the operand stack at 4,096 values, and the parser rejects code nested more than 200 levels deep instead of overflowing the JS stack
-- The debugger's recording is capped at 100,000 steps; memory per step is not yet bounded (see Known Limitations)
+- The debugger's recording stops at 1,000,000 steps (marked as truncated) and keeps at most 200 checkpoints; breakpoint conditions run on a separate VM with a 100,000-instruction budget
 
 ---
 
 ## Known Limitations
 
-1. **Memory for very long executions**: Full snapshots per step. A program that runs 100,000 steps may use significant memory. Mitigation: checkpoint every N steps + replay.
+1. **Very long executions**: Recording keeps 20 bytes per step, so a 1,000,000-step run needs about 20 MB of trace plus its checkpoints. Longer runs are truncated rather than recorded in full.
 2. **Memory management is delegated to JavaScript**: CodeTime values are JS objects, so the host garbage collector frees unreachable values. The VM has no GC of its own and no allocation statistics.
 3. **Single-threaded**: The language has no concurrency primitives.
 4. **No module system**: No `import` / `export`. Planned for v2.
@@ -317,7 +282,6 @@ Messages received from the worker:
 ## Future Improvements
 
 - [ ] Module system with `import`
-- [ ] Checkpoint-based time-travel for very long executions
 - [ ] Type annotations (optional, for tooling)
 - [ ] Tail-call optimization
 - [ ] REPL
