@@ -1,4 +1,8 @@
 import { TimeTravelDebugger } from '@codetime/compiler';
+import type { BreakpointSpec, WorkerError, WorkerRequest, WorkerResponse } from './protocol';
+
+/** Timeline events sent on each side of the current step. */
+const TIMELINE_RADIUS = 60;
 
 let debuggerInstance: TimeTravelDebugger | null = null;
 
@@ -6,133 +10,95 @@ let debuggerInstance: TimeTravelDebugger | null = null;
  * Breakpoints belong to the editing session, not to one recording: they can be
  * set before the first Debug and must survive every re-record.
  */
-const breakpoints = new Set<number>();
+let breakpoints: BreakpointSpec[] = [];
 
-function record(source: string): TimeTravelDebugger {
-  const dbg = TimeTravelDebugger.fromSource(source);
-  for (const line of breakpoints) dbg.setBreakpoint(line);
-  return dbg;
+function post(message: WorkerResponse): void {
+  self.postMessage(message);
+}
+
+function toWorkerError(err: unknown): WorkerError {
+  const e = err as { message?: string; loc?: { line?: number; column?: number }; format?: () => string; name?: string };
+  const message = e?.message ?? String(err);
+  return {
+    message,
+    line: e?.loc?.line ?? 1,
+    column: e?.loc?.column ?? 1,
+    formatted: typeof e?.format === 'function' ? e.format() : message,
+    kind: e?.name ?? 'Error',
+  };
+}
+
+/** Apply breakpoints to the debugger, reporting conditions that do not parse. */
+function applyBreakpoints(dbg: TimeTravelDebugger): void {
+  dbg.clearBreakpoints();
+  for (const bp of breakpoints) {
+    try {
+      dbg.setBreakpoint(bp.line, bp.condition);
+    } catch (err) {
+      dbg.setBreakpoint(bp.line);
+      post({ type: 'NOTICE', message: `${toWorkerError(err).message} The breakpoint on line ${bp.line} stops unconditionally.` });
+    }
+  }
 }
 
 function sendState(): void {
-  if (!debuggerInstance) return;
-  self.postMessage({
-    type: 'STATE_UPDATE',
-    payload: {
-      state: debuggerInstance.getCurrentState(),
-      timeline: debuggerInstance.getTimeline(),
-    },
+  const dbg = debuggerInstance;
+  if (!dbg) return;
+  const state = dbg.getCurrentState();
+  const start = Math.max(0, state.currentStep - TIMELINE_RADIUS);
+  post({
+    type: 'STATE',
+    state,
+    timeline: { start, events: dbg.getEvents(start, state.currentStep + TIMELINE_RADIUS) },
+    stats: dbg.getStats(),
+    runtimeError: dbg.runtimeError ? toWorkerError(dbg.runtimeError) : null,
   });
 }
 
-self.onmessage = (e: MessageEvent) => {
-  const { type, payload } = e.data as { type: string; payload: Record<string, any> };
-
-  try {
-    switch (type) {
-      /**
-       * RECORD: compile + record all execution steps, then position at step 0.
-       * Responds with the initial debugger state (step 0).
-       */
-      case 'RECORD': {
-        debuggerInstance = record(payload.source as string);
-        debuggerInstance.restart();
-        sendState();
-        break;
-      }
-
-      /**
-       * RECORD_AND_END: compile + record all steps, then jump to the final step.
-       * Used for "Run" mode — no need to scrub through intermediate steps.
-       */
-      case 'RECORD_AND_END': {
-        debuggerInstance = record(payload.source as string);
-        debuggerInstance.gotoEnd();
-        sendState();
-        break;
-      }
-
-      case 'STEP_FORWARD':
-        debuggerInstance?.stepForward();
-        sendState();
-        break;
-
-      case 'STEP_BACKWARD':
-        debuggerInstance?.stepBackward();
-        sendState();
-        break;
-
-      case 'STEP_OVER':
-        debuggerInstance?.stepOver();
-        sendState();
-        break;
-
-      case 'RESTART':
-        debuggerInstance?.restart();
-        sendState();
-        break;
-
-      case 'GOTO_END':
-        debuggerInstance?.gotoEnd();
-        sendState();
-        break;
-
-      case 'GOTO_STEP':
-        debuggerInstance?.gotoStep(payload.stepIndex as number);
-        sendState();
-        break;
-
-      case 'CONTINUE':
-        debuggerInstance?.continueToBreakpoint();
-        sendState();
-        break;
-
-      case 'SET_BREAKPOINT':
-        breakpoints.add(payload.line as number);
-        debuggerInstance?.setBreakpoint(payload.line as number);
-        sendState();
-        break;
-
-      case 'REMOVE_BREAKPOINT':
-        breakpoints.delete(payload.line as number);
-        debuggerInstance?.removeBreakpoint(payload.line as number);
-        sendState();
-        break;
-
-      case 'TOGGLE_BREAKPOINT': {
-        const line = payload.line as number;
-        if (breakpoints.has(line)) breakpoints.delete(line);
-        else breakpoints.add(line);
-        debuggerInstance?.toggleBreakpoint(line);
-        sendState();
-        break;
-      }
-
-      case 'CLEAR_BREAKPOINTS':
-        breakpoints.clear();
-        debuggerInstance?.clearBreakpoints();
-        sendState();
-        break;
-
-      default:
-        console.warn('[worker] Unknown message type:', type);
+function handle(request: WorkerRequest): void {
+  switch (request.type) {
+    case 'RECORD': {
+      const dbg = new TimeTravelDebugger(request.source);
+      dbg.record();
+      applyBreakpoints(dbg);
+      debuggerInstance = dbg;
+      if (request.startAt === 'end') dbg.gotoEnd();
+      else dbg.restart();
+      sendState();
+      return;
     }
-  } catch (err: any) {
-    // Distinguish between compile-time errors and runtime errors
-    const message: string = err.message ?? String(err);
-    const loc = err.loc ?? { line: 1, column: 1 };
+    case 'NAVIGATE':
+      debuggerInstance?.navigate(request.command);
+      sendState();
+      return;
+    case 'GOTO_STEP':
+      debuggerInstance?.gotoStep(request.step);
+      sendState();
+      return;
+    case 'FIND_CHANGE': {
+      const dbg = debuggerInstance;
+      if (!dbg) return;
+      const step = dbg.findChange(request.name, request.direction);
+      if (step < 0) {
+        const when = request.direction === 'backward' ? 'before' : 'after';
+        post({ type: 'NOTICE', message: `'${request.name}' is not written ${when} this step.` });
+        return;
+      }
+      dbg.gotoStep(step);
+      sendState();
+      return;
+    }
+    case 'SET_BREAKPOINTS':
+      breakpoints = request.breakpoints;
+      if (debuggerInstance) applyBreakpoints(debuggerInstance);
+      return;
+  }
+}
 
-    self.postMessage({
-      type: 'ERROR',
-      payload: {
-        message,
-        line: loc.line ?? 1,
-        column: loc.column ?? 1,
-        formatted: typeof err.format === 'function'
-          ? err.format()
-          : message,
-        kind: err.constructor?.name ?? 'Error',
-      },
-    });
+self.onmessage = (e: MessageEvent<WorkerRequest>) => {
+  try {
+    handle(e.data);
+  } catch (err) {
+    post({ type: 'ERROR', error: toWorkerError(err) });
   }
 };

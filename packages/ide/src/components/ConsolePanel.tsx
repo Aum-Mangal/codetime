@@ -3,10 +3,12 @@ import { Terminal, Trash2 } from 'lucide-react';
 
 export interface ConsolePanelProps {
   output: string[];
+  /** Formatted runtime error, shown after the output when the program failed. */
+  error?: string;
   onClear?: () => void;
 }
 
-export const ConsolePanel: React.FC<ConsolePanelProps> = ({ output, onClear }) => {
+export const ConsolePanel: React.FC<ConsolePanelProps> = ({ output, error, onClear }) => {
   return (
     <div className="h-full flex flex-col bg-slate-950 text-xs font-mono select-text overflow-hidden">
       <div className="px-3 py-1.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
@@ -26,7 +28,7 @@ export const ConsolePanel: React.FC<ConsolePanelProps> = ({ output, onClear }) =
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 font-mono text-emerald-400 leading-relaxed space-y-1">
-        {output.length === 0 ? (
+        {output.length === 0 && !error ? (
           <p className="text-slate-500 italic text-[11px]">No program output</p>
         ) : (
           output.map((line, idx) => (
@@ -36,6 +38,7 @@ export const ConsolePanel: React.FC<ConsolePanelProps> = ({ output, onClear }) =
             </div>
           ))
         )}
+        {error && <pre className="whitespace-pre-wrap text-rose-300 pt-1">{error}</pre>}
       </div>
     </div>
   );
