@@ -15,11 +15,14 @@ export default defineConfig({
     },
   },
   server: {
+    // Bound to localhost only; pass `--host` explicitly to expose it on a network.
     port: 5173,
-    host: true,
+    fs: {
+      // Allow importing the shared example programs from the repo root.
+      allow: [path.resolve(__dirname, '../..')],
+    },
   },
   worker: {
     format: 'es',
-    plugins: () => [tailwindcss()],
   },
 });

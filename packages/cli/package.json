@@ -1,6 +1,6 @@
 {
   "name": "@codetime/cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Command-line interface for the CodeTime programming language",
   "main": "./dist/index.js",
   "bin": {
@@ -9,10 +9,11 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@codetime/compiler": "^1.0.0"
+    "@codetime/compiler": "^1.1.0"
   },
   "devDependencies": {
     "rimraf": "^6.0.0",

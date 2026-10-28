@@ -1,6 +1,6 @@
 {
   "name": "codetime",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "A programming language with a visual time-travel debugger",
   "private": true,
   "workspaces": [
@@ -12,8 +12,9 @@
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "bench": "npm run bench --workspace=@codetime/compiler",
-    "lint": "eslint .",
-    "clean": "npm run clean --workspaces --if-present"
+    "lint": "eslint . --max-warnings 0",
+    "clean": "npm run clean --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
@@ -23,7 +24,10 @@
     "typescript": "^5.5.0"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=20.19.0",
     "npm": ">=9.0.0"
+  },
+  "overrides": {
+    "dompurify": "^3.4.17"
   }
 }

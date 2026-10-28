@@ -5,3 +5,10 @@ dist/
 .DS_Store
 coverage/
 *.log
+
+# Local document tooling and generated files (not part of the project)
+generate_pdf.cjs
+test-cdp.cjs
+test_*.cjs
+*.pdf
+CODETIME_COMPLETE_ENGINEERING_MASTERY.md
