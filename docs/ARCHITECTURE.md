@@ -226,17 +226,23 @@ IDE (React)
 │   └── @codetime/compiler — compile + record + replay run here
 │       (off the main thread; UI stays responsive)
 │
+├── Header — Run / Debug, example picker, Share (program in the URL fragment)
+├── TransportBar — reverse and forward stepping, continue / reverse continue
+│   └── RunScrubber — canvas minimap of the whole run; click, drag or arrow keys to travel
 ├── Editor (Monaco)
-│   ├── Custom Monarch tokenizer for CodeTime syntax
-│   ├── Current-line decoration
-│   └── Breakpoint glyphs (click: toggle, right-click: condition)
-│
-├── Header — Run / Debug, forward and reverse stepping, continue / reverse continue
-├── VariablesPanel — locals (by live range), captured variables, globals, "last change" buttons
-├── CallStackPanel — function call hierarchy
-├── TimelinePanel — events around the current step + recording stats
-└── MemoryPanel — operand stack
+│   ├── Monarch tokenizer, theme and completions for CodeTime
+│   ├── Live diagnostics as markers (compiled in the worker while typing)
+│   ├── Current-line decoration and breakpoint glyphs
+│   ├── BreakpointPopover — right-click the gutter to add or edit a condition
+│   ├── Inline values on the line of each variable's last write
+│   └── Hover: value at the current step and when it last changed
+├── Console / Problems tabs
+├── Inspector tabs — Variables (with "last change" buttons), Call stack, VM stack
+├── EventsPanel — events around the current step
+└── StatusBar — position, recording stats
 ```
+
+Colors, spacing and type come from design tokens in `src/index.css` (Tailwind `@theme`). They have the same names and values as the variables of the Figma design file the layout was drawn in.
 
 ### Worker Protocol
 
@@ -248,9 +254,14 @@ To the worker:
 - `{ type: 'GOTO_STEP', step }`
 - `{ type: 'FIND_CHANGE', name, direction }`: jump to the previous / next write of a variable
 - `{ type: 'SET_BREAKPOINTS', breakpoints }`: replace all breakpoints (`{ line, condition? }`)
+- `{ type: 'CHECK', source, version }`: compile only, for live diagnostics (debounced while typing)
+- `{ type: 'LAST_CHANGE', requestId, name }`: when was a variable last written (editor hover)
 
 From the worker:
-- `{ type: 'STATE', state, timeline: { start, events }, stats, runtimeError }`: the current step, with a window of about 120 events, never the whole run
+- `{ type: 'STATE', state, timeline: { start, events }, stats, runtimeError, lastWriteLines }`: the current step, with a window of about 120 events, never the whole run
+- `{ type: 'OVERVIEW', overview }`: the whole run in 2,048 buckets (most notable event kind and deepest call per bucket, from `getOverview`) plus the steps where breakpoints stop; sent after recording and when breakpoints change, so its size does not depend on the length of the run
+- `{ type: 'DIAGNOSTICS', version, diagnostics }`: answers `CHECK`; stale versions are ignored
+- `{ type: 'LAST_CHANGE', requestId, step, line }`
 - `{ type: 'NOTICE', message }`: e.g. "'x' is not written before this step"
 - `{ type: 'ERROR', error }`: compile error or failure
 

@@ -99,13 +99,15 @@ Stack slots are reused by sibling blocks, so a slot number does not identify a v
   - `stepForward` / `stepBackward` / `gotoStep`: instruction-level movement.
   - Bounded memory: 20 bytes per step plus at most 200 checkpoints; very long runs are marked as truncated instead of silently cut off.
 - **Browser IDE (`packages/ide`)**:
-  - **Monaco Editor** with custom Monarch syntax highlighting and theme.
-  - Background **Web Worker** execution thread so the UI remains completely fluid and responsive.
+  - **Run scrubber**: a canvas minimap of the whole recording (event kind by color, call depth by height, breakpoint stops as ticks). Click, drag or use the arrow keys to travel to any step.
+  - **Monaco Editor** with a Monarch tokenizer, theme and completions for CodeTime, and **live diagnostics** (compiled in the worker while you type) shown as squiggles and in a Problems tab.
+  - **Inline values** on the line where each variable was last written, and **hover** to see a variable's value and the step that last changed it.
   - Forward and reverse stepping controls with VS Code-style shortcuts (Shift reverses direction).
-  - Conditional breakpoints (right-click a breakpoint) and a "last change" button on every variable.
-  - **Execution Timeline Panel** showing the events around the current step and the recording's size.
-  - Live inspection panels for **Variables**, **Call Stack**, and **Operand Stack**.
-  - Typed worker protocol; each message carries one step's state, never the whole run.
+  - Conditional breakpoints edited in a gutter popover (right-click the gutter), and a "last change" button on every variable.
+  - **Shareable links**: the program is compressed into the URL fragment; nothing is uploaded.
+  - Inspector tabs for **Variables**, **Call Stack** and the **VM operand stack**, plus a list of the events around the current step.
+  - Background **Web Worker**; a typed protocol where each message carries one step's state and a fixed-size overview, never the whole run.
+  - Layout designed in Figma first; the CSS design tokens match the Figma variables one-to-one. Works down to phone width.
 - **Developer CLI (`packages/cli`)**:
   - `codetime run <file>` — Run CodeTime source files.
   - `codetime tokens <file>` — Inspect lexer token stream.
@@ -113,10 +115,10 @@ Stack slots are reused by sibling blocks, so a slot number does not identify a v
   - `codetime compile <file>` — Disassemble bytecode instructions.
   - `codetime eval "<code>"` — Evaluate code snippets interactively.
 - **Automated Verification**:
-  - 320 Vitest tests, run in CI on Linux and Windows with Node 20 and 22. Line coverage of the compiler package is 95.8%, and CI fails below 94%.
+  - 326 Vitest tests, run in CI on Linux and Windows with Node 20 and 22. Line coverage of the compiler package is 95.7%, and CI fails below 94%.
   - **Property-based differential fuzzing** ([fast-check](https://fast-check.dev/)). Random well-formed programs, with closures, default parameters, nested loops, block locals, array mutation and occasional runtime errors, must give the same output and the same error on the VM and through the replay debugger. Replayed state must match at random steps, and arbitrary or truncated source must never crash the toolchain with a raw JavaScript exception. Shrinking reduces a failure to a minimal program.
   - **Golden-output tests**: every `examples/*.ct` has a checked-in `.expected` file, compared against the VM, the replay debugger, and the built `codetime` CLI.
-  - **End-to-end tests** ([Playwright](https://playwright.dev/), Chrome) against the production build, covering the reverse-stepping demo, the "last change" watchpoint, breakpoints set before Debug, a run that hits the step limit, and compile-error reporting.
+  - **End-to-end tests** ([Playwright](https://playwright.dev/), Chrome) against the production build, covering the reverse-stepping demo, the "last change" watchpoint, breakpoints (plain and conditional, set in the gutter popover), the run scrubber by mouse and keyboard, hover values, live diagnostics, share links, and a run that hits the step limit.
 
 ---
 
@@ -220,7 +222,7 @@ codetime/
 │   │   │   ├── codegen/     Bytecode compiler & disassembler
 │   │   │   ├── vm/          Stack Virtual Machine runtime
 │   │   │   └── debugger/    Record-and-replay debugger: trace, checkpoints, navigation
-│   │   ├── tests/           Vitest unit, regression, golden & property-based suites (320 tests)
+│   │   ├── tests/           Vitest unit, regression, golden & property-based suites (326 tests)
 │   │   └── benchmarks/      Throughput benchmark suite
 │   ├── cli/              Node.js CLI executable tool (codetime)
 │   └── ide/              React + Vite + Monaco + Web Worker Visual Time-Travel IDE (e2e/: Playwright)
