@@ -1,6 +1,6 @@
 # CodeTime
 
-> A complete programming language with an $O(1)$ time-travel debugger and visual web IDE.
+> A programming language with a bytecode VM, a time-travel debugger, and a browser IDE, written in TypeScript.
 
 🌐 **[Try the Live IDE →](https://aum-mangal.github.io/codetime/)**
 
@@ -16,13 +16,13 @@
 
 ![CodeTime Visual Time-Travel IDE](assets/codetime-debugger-preview.svg)
 
-> **Debugging a subtle bug with Time Travel:** Step backward through execution history to inspect exact local variables (`hi: 8`, `mid: 4`, `value: 9`), view past call stack frames, and pinpoint the exact line where an off-by-one boundary defect occurred.
+> *Illustration of the IDE layout.* Open the [live IDE](https://aum-mangal.github.io/codetime/) and pick **Buggy Binary Search** to try the real thing: run it, then step backward from a wrong `-1` result to find the off-by-one in the loop condition.
 
 ---
 
 ## ⚡ Performance Benchmarks
 
-Measured on a standard single-threaded test runner (`npm run bench`):
+Measured with `npm run bench` on a single ~25-line program (recursive Fibonacci plus a bubble sort of 10 numbers). These are micro-benchmarks of each stage, not a comparison against other languages. Results vary by up to ~50% between runs on the same laptop, so treat them as rough orders of magnitude:
 
 | Pipeline Stage / Component | Sample Size | Throughput | Latency / Speed |
 |---|---|---|---|
@@ -31,7 +31,9 @@ Measured on a standard single-threaded test runner (`npm run bench`):
 | **Semantic Scope Analysis** | 2,000 runs | **150,000+ ops/sec** | ~0.006 ms / run |
 | **Bytecode Compilation** | 2,000 runs | **95,000+ ops/sec** | ~0.01 ms / run |
 | **VM Execution (Full Program)** | 1,000 runs | **7,500+ runs/sec** | ~0.13 ms / run |
-| **Time-Travel Snapshot Recording** | 100 runs | **150,000+ steps/sec** | ~0.006 ms / step ($O(1)$) |
+| **Time-Travel Snapshot Recording** | 100 runs | **150,000+ steps/sec** | ~0.006 ms / step (small program state) |
+
+> Recording speed depends on program size: each step currently copies the full program state, so a loop that builds a 5,000-element array records at only ~6,000 steps/sec and uses ~3 GB. A checkpoint + replay recorder is the planned fix.
 
 ---
 
@@ -39,11 +41,11 @@ Measured on a standard single-threaded test runner (`npm run bench`):
 
 **CodeTime** is a programming language and developer environment designed from the ground up to make debugging intuitive, visual, and non-destructive.
 
-Traditional debuggers only allow forward execution. If you step past a critical bug or mutate state accidentally, your only choice is to restart the entire session from scratch. CodeTime eliminates this limitation with an integrated **$O(1)$ Time-Travel Debugger Engine**:
-- Captures deterministic state snapshots after every bytecode instruction.
-- Enables **instant bidirectional stepping** (`stepBackward` and `stepForward`).
-- Provides a scrubbable execution timeline with zero replay lag.
-- Displays live variable state, call stack frames, and VM operand stacks for any point in execution history.
+In most everyday debugging you can only step forward: step past the interesting moment and you have to restart. Reverse debugging exists in tools like gdb (`reverse-step`), rr and WinDbg TTD, but it usually needs special setup. CodeTime builds it into the language:
+- The debugger records a state snapshot after every bytecode instruction.
+- You can step backward and forward, or jump to any recorded step, without re-running the program.
+- An execution timeline shows every recorded event; click any event to jump to it.
+- Variables, call stack frames, and the VM operand stack are shown for whichever step you are on.
 
 The project is structured as a TypeScript monorepo featuring a full compiler pipeline, a bytecode virtual machine, a command-line interface (CLI), and a modern browser-based IDE powered by Monaco Editor and Web Workers.
 
@@ -53,29 +55,16 @@ The project is structured as a TypeScript monorepo featuring a full compiler pip
 
 ## 🏗️ How I Built This (Key Engineering Decisions)
 
-### 1. Why Pratt Parsing over Recursive Descent?
-Traditional recursive-descent parsers require a dedicated function for every operator precedence level (`parseEquality` → `parseComparison` → `parseTerm` → `parseFactor`), leading to deeply nested call stacks, high function-call overhead, and rigid grammar rules.
+The bytecode design (opcodes, call frames, open/closed upvalues for closures) follows the clox VM from Robert Nystrom's [*Crafting Interpreters*](https://craftinginterpreters.com/). The time-travel debugger, structs, default parameters, error recovery and the IDE are CodeTime's own.
 
-CodeTime uses **Pratt Parsing** (Top-Down Operator Precedence). Each token is associated with a numeric binding power and parsing semantic (prefix or infix). This:
-- Reduced parser call-stack depth by over **60%**.
-- Unified unary, binary, and ternary expressions into a single, compact parsing loop.
-- Made operator precedence and associativity easy to configure and extend without touching grammar rules.
+### 1. Precedence climbing for expressions
+Binary operators are parsed with precedence climbing (the binary-operator core of a Pratt parser): each operator has a binding power, and one loop handles every precedence level instead of one function per level. Precedence follows Python: `**` binds tighter than unary minus (`-2 ** 2` is `-4`), and `not` binds looser than comparisons (`not a == b` is `not (a == b)`). The parser recovers from syntax errors, so one pass reports every error.
 
-### 2. Why a Bytecode Virtual Machine over a Tree-Walking Interpreter?
-Tree-walking interpreters traverse the AST directly during execution. This incurs continuous pointer chasing, terrible CPU cache locality, and significant memory overhead from recursive tree evaluation.
+### 2. A bytecode VM instead of a tree-walking interpreter
+The compiler turns the AST into a flat array of opcodes in a single pass, and the VM runs them in one dispatch loop over an operand stack. Bytecode gives the debugger a natural unit of execution (one instruction = one step) and an instruction pointer to record. I have not benchmarked it against a tree-walking interpreter, so I make no speed claim here.
 
-CodeTime's single-pass compiler transforms the AST into flat, contiguous **bytecode chunks** (`OpCode`). The virtual machine evaluates these bytecodes inside a tight loop with a contiguous operand stack. This approach delivers:
-- **~10x faster execution speed** compared to tree-walking.
-- High L1/L2 cache hit rates due to sequential instruction layout.
-- Predictable, bounded memory footprints with zero tree recursion during runtime.
-
-### 3. Why an Indexed Snapshot Array for Time-Travel Debugging?
-Traditional reversible debugging attempts often rely on *inverse operations* (synthesizing an inverse instruction for every forward opcode). However, lossy operations (variable reassignment, array mutations, mathematical truncation) are mathematically non-invertible without caching previous states anyway.
-
-CodeTime uses an **instrumented snapshot array**: after each bytecode instruction, a deterministic snapshot of the instruction pointer, variable store, and operand stack frame is recorded. Because snapshots are stored in a contiguous indexable sequence:
-- **Stepping backward** is an instantaneous pointer decrement ($O(1)$).
-- **Stepping forward** is an instantaneous pointer increment ($O(1)$).
-- **Scrubbing to any historical tick** on the timeline is a constant-time array lookup ($O(1)$), allowing 60fps scrubbing with zero re-computation lag.
+### 3. Snapshot history for time travel
+Many opcodes destroy information (an assignment overwrites the old value), so you cannot simply run instructions backward. Instead the debugger records a snapshot of program state after each instruction: moving to any step is then an O(1) array lookup. The cost is memory, which grows with steps × program state; the planned fix is periodic checkpoints plus replay (the approach used by rr).
 
 ---
 
@@ -84,18 +73,18 @@ CodeTime uses an **instrumented snapshot array**: after each bytecode instructio
 - **Full Compiler Pipeline**:
   - **Lexer**: Deterministic tokenizer tracking source coordinates (line, column spans).
   - **Pratt Parser**: Operator precedence parser supporting expressions, statements, and blocks.
-  - **Semantic Analyzer**: Scope resolution, variable shadowing verification, and identifier binding.
+  - **Semantic Analyzer**: Scope resolution, arity checks for functions and structs, loop/function context checks, and shadowing warnings.
   - **Bytecode Compiler**: Single-pass code generator emitting bytecode chunks, constant pools, and line maps.
-  - **Virtual Machine**: Stack-based execution engine with call frames, closures, and runtime safety checks.
-- **$O(1)$ Time-Travel Debugger Engine**:
+  - **Virtual Machine**: Stack-based execution engine with call frames, closures, an instruction budget, and runtime type checks.
+- **Time-Travel Debugger Engine**:
   - `stepForward` / `stepBackward` — Step by single bytecode instruction.
   - `stepOver` — Step over function calls while tracking nested state.
-  - `continueToBreakpoint` — Run forward or rewind directly to any line breakpoint.
-  - `gotoStep` — Jump to any exact execution tick in $O(1)$ constant time.
+  - `continueToBreakpoint` — Run forward to the next line breakpoint.
+  - `gotoStep` — Jump to any recorded step (an O(1) lookup).
 - **Browser IDE (`packages/ide`)**:
   - **Monaco Editor** with custom Monarch syntax highlighting and theme.
   - Background **Web Worker** execution thread so the UI remains completely fluid and responsive.
-  - **Execution Timeline Panel** with scrubbing slider and step-by-step navigation.
+  - **Execution Timeline Panel** listing every recorded event; click one to jump to it.
   - Live inspection panels for **Variables**, **Call Stack**, and **Operand Stack**.
 - **Developer CLI (`packages/cli`)**:
   - `codetime run <file>` — Run CodeTime source files.
@@ -104,7 +93,7 @@ CodeTime uses an **instrumented snapshot array**: after each bytecode instructio
   - `codetime compile <file>` — Disassemble bytecode instructions.
   - `codetime eval "<code>"` — Evaluate code snippets interactively.
 - **Automated Verification**:
-  - 228 automated unit and integration tests passing with 100% success rate across Linux and Windows.
+  - 261 unit, integration and regression tests (Vitest), run in CI on Linux and Windows with Node 20 and 22.
 
 ---
 
@@ -126,7 +115,7 @@ cd codetime
 npm install
 npm run build
 
-# Run full test suite (228 tests across 7 test suites)
+# Run full test suite (261 tests across 8 test files)
 npm test
 
 # Run performance benchmarks
@@ -196,13 +185,13 @@ codetime/
 │   ├── compiler/         Language compiler, VM engine & Debugger (pure TypeScript)
 │   │   ├── src/
 │   │   │   ├── lexer/       Tokenization & coordinate tracking
-│   │   │   ├── parser/      Recursive-descent & Pratt precedence parser
+│   │   │   ├── parser/      Recursive-descent parser with precedence climbing
 │   │   │   ├── ast/         AST node definitions & AST visualizer
 │   │   │   ├── semantic/    Scope hierarchy & semantic verification
 │   │   │   ├── codegen/     Bytecode compiler & disassembler
 │   │   │   ├── vm/          Stack Virtual Machine runtime
 │   │   │   └── debugger/    Time-travel snapshot recorder & navigation engine
-│   │   ├── tests/           Vitest unit & integration test suites (228 tests)
+│   │   ├── tests/           Vitest unit, integration & regression suites (261 tests)
 │   │   └── benchmarks/      Throughput benchmark suite
 │   ├── cli/              Node.js CLI executable tool (codetime)
 │   └── ide/              React + Vite + Monaco + Web Worker Visual Time-Travel IDE

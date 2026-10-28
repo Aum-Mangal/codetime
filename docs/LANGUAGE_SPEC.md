@@ -1,6 +1,6 @@
 # CodeTime Language Specification
 
-**Version 1.0** | Language design document for the CodeTime programming language.
+**Version 1.1** | Language design document for the CodeTime programming language.
 
 ---
 
@@ -104,14 +104,21 @@ CodeTime is dynamically typed. Values carry their own type at runtime.
 
 | Level | Operator(s)              | Associativity |
 |-------|--------------------------|---------------|
-| 8     | `-` `not` `!` (unary)    | Right         |
-| 7     | `**`                     | Right         |
-| 6     | `*` `/` `%`              | Left          |
-| 5     | `+` `-`                  | Left          |
-| 4     | `<` `<=` `>` `>=`        | Left          |
-| 3     | `==` `!=`                | Left          |
+| 9     | `**`                     | Right         |
+| 8     | `-` `!` (unary)          | Right         |
+| 7     | `*` `/` `%`              | Left          |
+| 6     | `+` `-`                  | Left          |
+| 5     | `<` `<=` `>` `>=`        | Left          |
+| 4     | `==` `!=`                | Left          |
+| 3     | `not` (unary)            | Right         |
 | 2     | `and`                    | Left          |
 | 1     | `or`                     | Left          |
+
+These follow Python's rules:
+
+- `**` binds tighter than a unary minus on its left, so `-2 ** 2` is `-(2 ** 2)` = `-4`. Its right operand may be unary: `2 ** -1` = `0.5`.
+- `not` binds looser than comparisons, so `not a == b` means `not (a == b)`. `!` is the high-precedence form: `!a == b` means `(!a) == b`.
+- `<`, `<=`, `>`, `>=` require two numbers or two strings; comparing other types is a runtime error.
 
 ### 3.2 Arithmetic
 
@@ -210,6 +217,19 @@ arr[0](args)    // calling a function stored in an array
 ```codetime
 let double = fn(x) { return x * 2 }
 let result = double(5)   // 10
+```
+
+### 3.13 Default parameter values
+
+Trailing parameters can have defaults. A default is evaluated at call time inside the function, so it can use earlier parameters:
+
+```codetime
+fn greet(name, greeting = "Hello", punct = greeting == "Hi" and "!" or ".") {
+    return greeting + ", " + name + punct
+}
+greet("Ada")          // "Hello, Ada."
+fn area(w, h = w) { return w * h }
+area(3)               // 9 (a square)
 ```
 
 ---
@@ -440,9 +460,9 @@ print(p.x + p.y)   // 30
 
 ---
 
-## 9. Structs (planned)
+## 9. Structs
 
-Structs are named object templates:
+A struct declares a named object shape. Calling the struct name with one argument per field creates an instance (the argument count is checked at compile time):
 
 ```codetime
 struct Point {
@@ -450,9 +470,14 @@ struct Point {
     y
 }
 
-let p = Point { x: 10, y: 20 }
-print(p.x)   // 10
+let p = Point(10, 20)
+print(p.x)        // 10
+p.x += 5
+print(p)          // Point { x: 15, y: 20 }
+print(typeof(p))  // Point
 ```
+
+Instances are objects, so fields are read and written with `.` or `[]`.
 
 ---
 
@@ -514,19 +539,21 @@ exprStmt        ::= expression NEWLINE
 structStmt      ::= 'struct' IDENTIFIER '{' NEWLINE identifierList NEWLINE '}'
 blockStmt       ::= '{' NEWLINE? statement* '}'
 
-paramList       ::= (IDENTIFIER (',' IDENTIFIER)*)?
+paramList       ::= (param (',' param)*)?
+param           ::= IDENTIFIER ('=' expression)?
 identifierList  ::= (IDENTIFIER NEWLINE)*
 
 expression      ::= orExpr
 orExpr          ::= andExpr ('or' andExpr)*
-andExpr         ::= equalityExpr ('and' equalityExpr)*
+andExpr         ::= notExpr ('and' notExpr)*
+notExpr         ::= 'not' notExpr | equalityExpr
 equalityExpr    ::= relationalExpr (('==' | '!=') relationalExpr)*
 relationalExpr  ::= addExpr (('<' | '<=' | '>' | '>=') addExpr)*
 addExpr         ::= mulExpr (('+' | '-') mulExpr)*
-mulExpr         ::= powerExpr (('*' | '/' | '%') powerExpr)*
-powerExpr       ::= unaryExpr ('**' powerExpr)?  // right-associative
-unaryExpr       ::= ('-' | 'not' | '!') unaryExpr
-                  | postfixExpr
+mulExpr         ::= unaryExpr (('*' | '/' | '%') unaryExpr)*
+unaryExpr       ::= ('-' | '!') unaryExpr
+                  | powerExpr
+powerExpr       ::= postfixExpr ('**' unaryExpr)?  // right-associative
 postfixExpr     ::= primary (callSuffix | indexSuffix | memberSuffix)*
 callSuffix      ::= '(' argList ')'
 indexSuffix     ::= '[' expression ']'

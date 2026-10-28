@@ -163,7 +163,7 @@ Each instruction also carries a `sourceIndex` — an index into the source map, 
 
 **File:** `packages/compiler/src/vm/`
 
-Stack-based VM inspired by CPython and the Crafting Interpreters Lox VM.
+Stack-based VM. The bytecode design (opcode set, call frames, open/closed upvalues for closures) follows the clox VM from Robert Nystrom's *Crafting Interpreters*; CodeTime's additions are the debugger, struct and default-parameter support, and the IDE.
 
 ### Data Structures
 
@@ -235,7 +235,7 @@ The snapshot array is stored in `Debugger.history: ExecutionSnapshot[]`.
 | Jump to step N | Return `history[N]` |
 | Restart | Reset current step to 0, return `history[0]` |
 
-**Complexity:** Step backward and jump-to are O(1) — no replay needed. The tradeoff is memory: for typical programs (< 10,000 steps) the history stays well under 10 MB. For very long programs, a checkpoint+replay hybrid would be needed (documented as a known limitation).
+**Complexity:** Step backward and jump-to are O(1) — no replay needed. The tradeoff is memory: every step stores a full copy of program state, so recording memory is O(steps x state size). Measured: a loop pushing 500 items (8k steps) uses ~41 MB; 5,000 items (80k steps) uses ~3 GB. A checkpoint + replay recorder fixes this and is the next planned change.
 
 ### State Restoration
 
@@ -299,13 +299,16 @@ Messages received from the worker:
 - No filesystem, network, process, or OS access
 - In the browser: the VM runs in a Web Worker (sandboxed by the browser security model)
 - In Node.js CLI: the VM runs in the same process but is a pure computation engine with no native bindings
+- Objects are backed by `Map`, never plain JS objects, so programs cannot reach or pollute JavaScript prototypes
+- Resource limits: an instruction budget (default 10M, `--max-steps` in the CLI) stops infinite loops, call depth is capped at 256 frames, the operand stack at 4,096 values, and the parser rejects code nested more than 200 levels deep instead of overflowing the JS stack
+- The debugger's recording is capped at 100,000 steps; memory per step is not yet bounded (see Known Limitations)
 
 ---
 
 ## Known Limitations
 
 1. **Memory for very long executions**: Full snapshots per step. A program that runs 100,000 steps may use significant memory. Mitigation: checkpoint every N steps + replay.
-2. **No garbage collection**: Values are never freed during execution in the current VM design.
+2. **Memory management is delegated to JavaScript**: CodeTime values are JS objects, so the host garbage collector frees unreachable values. The VM has no GC of its own and no allocation statistics.
 3. **Single-threaded**: The language has no concurrency primitives.
 4. **No module system**: No `import` / `export`. Planned for v2.
 

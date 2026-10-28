@@ -2,7 +2,9 @@
 
 ## Overview
 
-The central architectural highlight of **CodeTime** is its native **Time-Travel Debugger**. Unlike traditional debuggers (gdb, lldb, VS Code Debugger) which only allow forward step execution, CodeTime captures a discrete step history during VM execution, enabling $O(1)$ bidirectional time travel (`stepForward`, `stepBackward`, `gotoStep`, `restart`, `continueToBreakpoint`).
+The central architectural highlight of **CodeTime** is its **time-travel debugger**. Most everyday debugging sessions only step forward; when you step past the interesting moment, you restart. Reverse debugging exists in mature tools (gdb's `record`/`reverse-step`, Mozilla's rr, WinDbg Time Travel Debugging) but usually needs special setup. CodeTime builds it into the language: the debugger records the program's execution once, then lets you move to any recorded step in either direction (`stepForward`, `stepBackward`, `gotoStep`, `restart`, `continueToBreakpoint`).
+
+> **Current design and its limits.** Today each step stores a full snapshot of program state, so moving between steps is an O(1) array lookup, but recording costs grow with program state: a loop that pushes 5,000 items into an array needs about 3 GB. The planned replacement is a checkpoint + replay recorder (periodic full snapshots plus a compact per-step event log), the same design family as rr. See `ARCHITECTURE.md` -> *Known Limitations*.
 
 ```
                               ┌───────────────────────────┐
@@ -80,7 +82,7 @@ The debugger maps low-level bytecode opcodes to high-level semantic events:
 
 ## 4. Performance & Memory Optimization
 
-- **$O(1)$ State Restoration**: Jump to any step index ($0 \le k < N$) in $0\text{ ms}$ without re-executing bytecode from step 0.
+- **O(1) navigation, O(state) recording**: Jumping to any recorded step is an array lookup with no re-execution. The cost is paid during recording, where each step copies globals, locals, the operand stack and the output so far.
 - **Reference Sharing**: Complex heap structures (closures, native functions) share immutable references across snapshots.
 - **Web Worker Isolation**: In the Visual IDE (`packages/ide`), execution snapshotting runs off the main UI thread in a dedicated Web Worker (`compiler.worker.ts`), preserving 60 FPS UI responsiveness.
 
