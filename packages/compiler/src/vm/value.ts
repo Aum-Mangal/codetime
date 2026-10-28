@@ -10,6 +10,15 @@ export interface ArrayValue {
 export interface ObjectValue {
   kind: 'object';
   fields: Map<string, Value>;
+  /** Set when the object was created by a struct constructor. */
+  structName?: string;
+}
+
+/** A struct declaration at runtime: calling it constructs an ObjectValue with these fields. */
+export interface StructTypeValue {
+  kind: 'struct';
+  name: string;
+  fields: string[];
 }
 
 export interface FunctionValue {
@@ -48,7 +57,8 @@ export type Value =
   | ObjectValue
   | FunctionValue
   | ClosureValue
-  | NativeFunctionValue;
+  | NativeFunctionValue
+  | StructTypeValue;
 
 export function isTruthy(val: Value): boolean {
   if (val === null) return false;
@@ -90,12 +100,18 @@ export function valueType(val: Value): string {
   if (typeof val === 'string') return 'string';
   if (typeof val === 'boolean') return 'boolean';
   if (typeof val === 'object') {
+    if (val.kind === 'object' && val.structName) return val.structName;
     return val.kind;
   }
   return 'unknown';
 }
 
-export function valueToString(val: Value): string {
+/**
+ * Convert a value to its display string. Containers already being printed are
+ * tracked in `seen`, so self-referencing arrays/objects print as `[...]` /
+ * `{...}` instead of recursing forever.
+ */
+export function valueToString(val: Value, seen: Set<object> = new Set()): string {
   if (val === null) return 'null';
   if (typeof val === 'number') return val.toString();
   if (typeof val === 'string') return val;
@@ -104,16 +120,22 @@ export function valueToString(val: Value): string {
   if (typeof val === 'object') {
     switch (val.kind) {
       case 'array': {
-        const elems = val.elements.map(e => (typeof e === 'string' ? `"${e}"` : valueToString(e))).join(', ');
+        if (seen.has(val)) return '[...]';
+        seen.add(val);
+        const elems = val.elements.map(e => nestedToString(e, seen)).join(', ');
+        seen.delete(val);
         return `[${elems}]`;
       }
       case 'object': {
+        if (seen.has(val)) return '{...}';
+        seen.add(val);
         const entries: string[] = [];
         for (const [k, v] of val.fields.entries()) {
-          const valStr = typeof v === 'string' ? `"${v}"` : valueToString(v);
-          entries.push(`${k}: ${valStr}`);
+          entries.push(`${k}: ${nestedToString(v, seen)}`);
         }
-        return `{ ${entries.join(', ')} }`;
+        seen.delete(val);
+        const prefix = val.structName ? `${val.structName} ` : '';
+        return `${prefix}{ ${entries.join(', ')} }`;
       }
       case 'function':
         return `<fn ${val.name || 'anonymous'}>`;
@@ -121,8 +143,22 @@ export function valueToString(val: Value): string {
         return `<fn ${val.fn.name || 'anonymous'}>`;
       case 'native':
         return `<native fn ${val.name}>`;
+      case 'struct':
+        return `<struct ${val.name}>`;
     }
   }
 
   return String(val);
+}
+
+/** Strings inside containers are quoted so `["a"]` is distinguishable from `[a]`. */
+function nestedToString(val: Value, seen: Set<object>): string {
+  return typeof val === 'string' ? `"${val}"` : valueToString(val, seen);
+}
+
+/** Build a struct instance from constructor arguments (one per declared field). */
+export function instantiateStruct(def: StructTypeValue, args: Value[]): ObjectValue {
+  const fields = new Map<string, Value>();
+  def.fields.forEach((field, i) => fields.set(field, args[i] ?? null));
+  return { kind: 'object', fields, structName: def.name };
 }

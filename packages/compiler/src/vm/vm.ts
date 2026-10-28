@@ -11,28 +11,27 @@ import {
   valuesEqual,
   valueToString,
   valueType,
+  instantiateStruct,
 } from './value.js';
+import { createNatives, getBuiltinProperty } from './natives.js';
 import { SourceLocation } from '../lexer/index.js';
-import { Lexer } from '../lexer/lexer.js';
-import { Parser } from '../parser/parser.js';
-import { SemanticAnalyzer } from '../semantic/analyzer.js';
-import { BytecodeCompiler } from '../codegen/compiler.js';
+import { CodeTimeError } from '../diagnostics/errors.js';
+import { compile } from '../pipeline.js';
 
-export class RuntimeError extends Error {
+export class RuntimeError extends CodeTimeError {
   constructor(
     message: string,
-    public readonly loc: SourceLocation,
+    loc: SourceLocation,
     public readonly callStack: { fnName: string; loc: SourceLocation }[] = [],
-    public readonly source?: string,
+    source?: string,
   ) {
-    super(message);
+    super(message, loc, source);
     this.name = 'RuntimeError';
   }
 
-  public format(src?: string): string {
+  public override format(src?: string): string {
     const sourceText = src ?? this.source;
-    const lines = sourceText ? sourceText.split('\n') : [];
-    const srcLine = lines[this.loc.line - 1] ?? '';
+    const srcLine = sourceText ? sourceText.split('\n')[this.loc.line - 1] ?? '' : '';
     const caret = ' '.repeat(Math.max(0, this.loc.column - 1)) + '^';
 
     const parts = [
@@ -65,11 +64,34 @@ export interface VMResult {
   success: boolean;
   output: string[];
   result?: Value;
-  error?: RuntimeError;
+  /** A compile-time diagnostic (from interpret) or a RuntimeError. */
+  error?: CodeTimeError;
 }
+
+export interface VMOptions {
+  /** Abort with a RuntimeError after this many instructions (0 or Infinity = no limit). */
+  maxInstructions?: number;
+}
+
+export const DEFAULT_MAX_INSTRUCTIONS = 10_000_000;
 
 const STACK_MAX = 4096;
 const FRAMES_MAX = 256;
+
+/**
+ * Marker the VM places in parameter slots whose argument was not passed. The
+ * function prologue (OP_JUMP_IF_ARG_PRESENT) replaces it with the default
+ * value before any user code runs, so it never escapes into the program.
+ */
+const MISSING_ARG = undefined as unknown as Value;
+
+/** Comparisons are only defined between two numbers or two strings. */
+function checkComparable(a: Value, b: Value, op: string): void {
+  const ok = (typeof a === 'number' && typeof b === 'number') || (typeof a === 'string' && typeof b === 'string');
+  if (!ok) {
+    throw new Error(`Operands for '${op}' must be two numbers or two strings, got '${valueType(a)}' and '${valueType(b)}'.`);
+  }
+}
 
 export class VM {
   public stack: Value[] = [];
@@ -78,62 +100,19 @@ export class VM {
   public openUpvalues: Upvalue[] = [];
   public output: string[] = [];
   public source?: string;
+  private readonly maxInstructions: number;
 
-  constructor(source?: string) {
+  constructor(source?: string, options: VMOptions = {}) {
     this.source = source;
+    const limit = options.maxInstructions ?? DEFAULT_MAX_INSTRUCTIONS;
+    this.maxInstructions = limit > 0 ? limit : Infinity;
     this.initGlobals();
   }
 
   private initGlobals(): void {
-    this.defineNative('print', -1, (args) => {
-      const line = args.map(a => valueToString(a)).join(' ');
-      this.output.push(line);
-      return null;
-    });
-
-    this.defineNative('len', 1, (args) => {
-      const arg = args[0]!;
-      if (typeof arg === 'string') return arg.length;
-      if (typeof arg === 'object' && arg !== null && arg.kind === 'array') return arg.elements.length;
-      if (typeof arg === 'object' && arg !== null && arg.kind === 'object') return arg.fields.size;
-      throw new Error(`'len()' not supported for type '${valueType(arg)}'.`);
-    });
-
-    this.defineNative('typeof', 1, (args) => {
-      return valueType(args[0]!);
-    });
-
-    this.defineNative('int', 1, (args) => {
-      const arg = args[0]!;
-      if (typeof arg === 'number') return Math.trunc(arg);
-      if (typeof arg === 'string') {
-        const parsed = parseInt(arg, 10);
-        if (isNaN(parsed)) throw new Error(`Cannot parse '${arg}' as integer.`);
-        return parsed;
-      }
-      if (typeof arg === 'boolean') return arg ? 1 : 0;
-      throw new Error(`Cannot convert type '${valueType(arg)}' to integer.`);
-    });
-
-    this.defineNative('float', 1, (args) => {
-      const arg = args[0]!;
-      if (typeof arg === 'number') return arg;
-      if (typeof arg === 'string') {
-        const parsed = parseFloat(arg);
-        if (isNaN(parsed)) throw new Error(`Cannot parse '${arg}' as float.`);
-        return parsed;
-      }
-      if (typeof arg === 'boolean') return arg ? 1.0 : 0.0;
-      throw new Error(`Cannot convert type '${valueType(arg)}' to float.`);
-    });
-
-    this.defineNative('str', 1, (args) => {
-      return valueToString(args[0]!);
-    });
-
-    this.defineNative('bool', 1, (args) => {
-      return isTruthy(args[0]!);
-    });
+    for (const [name, nativeVal] of createNatives(line => this.output.push(line))) {
+      this.globals.set(name, nativeVal);
+    }
   }
 
   public defineNative(name: string, arity: number, fn: (args: Value[]) => Value): void {
@@ -150,31 +129,11 @@ export class VM {
     this.source = source;
     this.output = [];
 
-    // 1. Lex
-    const tokens = new Lexer(source).tokenize();
-
-    // 2. Parse
-    const parser = new Parser(tokens, source);
-    const ast = parser.parse();
-
-    // 3. Semantic Analysis
-    const analyzer = new SemanticAnalyzer(source);
-    const semanticRes = analyzer.analyze(ast);
-    if (semanticRes.errors.length > 0) {
-      const err = semanticRes.errors[0]!;
-      return {
-        success: false,
-        output: this.output,
-        error: new RuntimeError(err.message, err.loc, [], source),
-      };
+    const compiled = compile(source);
+    if (!compiled.chunk) {
+      return { success: false, output: this.output, error: compiled.diagnostics[0] };
     }
-
-    // 4. Compile to Bytecode
-    const compiler = new BytecodeCompiler('script', 'main');
-    const chunk = compiler.compile(ast);
-
-    // 5. Run VM
-    return this.run(chunk);
+    return this.run(compiled.chunk);
   }
 
   public run(chunk: Chunk): VMResult {
@@ -205,6 +164,7 @@ export class VM {
 
   private execute(): VMResult {
     let frame = this.frames[this.frames.length - 1]!;
+    let executed = 0;
 
     while (true) {
       if (frame.ip >= frame.closure.fn.chunk.code.length) {
@@ -215,6 +175,11 @@ export class VM {
       const currentLoc = frame.closure.fn.chunk.locations[frame.ip - 1] ?? { line: 1, column: 1, offset: 0 };
 
       try {
+        if (++executed > this.maxInstructions) {
+          throw new Error(
+            `Execution stopped after reaching the instruction limit (${this.maxInstructions.toLocaleString('en-US')}). Is there an infinite loop?`,
+          );
+        }
         switch (instruction) {
           case OpCode.OP_CONSTANT: {
             const constIdx = frame.closure.fn.chunk.code[frame.ip++]!;
@@ -237,6 +202,21 @@ export class VM {
           case OpCode.OP_DUP: {
             const val = this.peek(0);
             this.push(val);
+            break;
+          }
+          case OpCode.OP_DUP2: {
+            const a = this.peek(1);
+            const b = this.peek(0);
+            this.push(a);
+            this.push(b);
+            break;
+          }
+          case OpCode.OP_JUMP_IF_ARG_PRESENT: {
+            const slot = frame.closure.fn.chunk.code[frame.ip++]!;
+            const offset = (frame.closure.fn.chunk.code[frame.ip++]! << 8) | frame.closure.fn.chunk.code[frame.ip++]!;
+            if (this.stack[frame.slots + slot] !== MISSING_ARG) {
+              frame.ip += offset;
+            }
             break;
           }
 
@@ -374,25 +354,29 @@ export class VM {
           case OpCode.OP_GREATER: {
             const b = this.pop();
             const a = this.pop();
-            this.push((a as any) > (b as any));
+            checkComparable(a, b, '>');
+            this.push((a as number) > (b as number));
             break;
           }
           case OpCode.OP_GREATER_EQUAL: {
             const b = this.pop();
             const a = this.pop();
-            this.push((a as any) >= (b as any));
+            checkComparable(a, b, '>=');
+            this.push((a as number) >= (b as number));
             break;
           }
           case OpCode.OP_LESS: {
             const b = this.pop();
             const a = this.pop();
-            this.push((a as any) < (b as any));
+            checkComparable(a, b, '<');
+            this.push((a as number) < (b as number));
             break;
           }
           case OpCode.OP_LESS_EQUAL: {
             const b = this.pop();
             const a = this.pop();
-            this.push((a as any) <= (b as any));
+            checkComparable(a, b, '<=');
+            this.push((a as number) <= (b as number));
             break;
           }
 
@@ -560,44 +544,14 @@ export class VM {
             const propName = frame.closure.fn.chunk.constants[constIdx] as string;
             const target = this.pop();
 
-            if (typeof target === 'object' && target !== null) {
-              if (target.kind === 'array') {
-                if (propName === 'length') {
-                  this.push(target.elements.length);
-                  break;
-                }
-                if (propName === 'push') {
-                  this.push({
-                    kind: 'native',
-                    name: 'push',
-                    arity: 1,
-                    fn: (args) => {
-                      target.elements.push(args[0]!);
-                      return target.elements.length;
-                    },
-                  });
-                  break;
-                }
-                if (propName === 'pop') {
-                  this.push({
-                    kind: 'native',
-                    name: 'pop',
-                    arity: 0,
-                    fn: () => {
-                      return target.elements.pop() ?? null;
-                    },
-                  });
-                  break;
-                }
-              } else if (target.kind === 'object') {
-                this.push(target.fields.has(propName) ? target.fields.get(propName)! : null);
-                break;
-              }
-            } else if (typeof target === 'string') {
-              if (propName === 'length') {
-                this.push(target.length);
-                break;
-              }
+            if (typeof target === 'object' && target !== null && target.kind === 'object') {
+              this.push(target.fields.has(propName) ? target.fields.get(propName)! : null);
+              break;
+            }
+            const builtin = getBuiltinProperty(target, propName);
+            if (builtin !== undefined) {
+              this.push(builtin);
+              break;
             }
 
             throw new Error(`Property '${propName}' not found on type '${valueType(target)}'.`);
@@ -678,6 +632,15 @@ export class VM {
         this.push(res);
         return;
       }
+      if (callee.kind === 'struct') {
+        if (argCount !== callee.fields.length) {
+          throw new Error(`Struct '${callee.name}' expects ${callee.fields.length} arguments, got ${argCount}.`);
+        }
+        const args = this.stack.splice(this.stack.length - argCount, argCount);
+        this.pop(); // Pop the struct type itself
+        this.push(instantiateStruct(callee, args));
+        return;
+      }
     }
     throw new Error(`Cannot call non-function value of type '${valueType(callee)}'.`);
   }
@@ -692,6 +655,12 @@ export class VM {
     if (this.frames.length >= FRAMES_MAX) {
       throw new Error(`Stack overflow (maximum recursion depth exceeded).`);
     }
+
+    // Fill omitted optional parameters so local slot numbering stays fixed.
+    for (let i = argCount; i < closure.fn.arity; i++) {
+      this.push(MISSING_ARG);
+    }
+    argCount = closure.fn.arity;
 
     const frame: CallFrame = {
       closure,

@@ -1,1 +1,1 @@
-export { Parser, ParserError } from './parser.js';
+export { Parser, ParserError, type ParseResult } from './parser.js';

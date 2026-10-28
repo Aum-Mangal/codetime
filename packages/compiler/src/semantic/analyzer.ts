@@ -1,4 +1,6 @@
 import { SourceLocation } from '../lexer/index.js';
+import { CodeTimeError, Severity } from '../diagnostics/errors.js';
+import { BUILTIN_SIGNATURES } from '../vm/natives.js';
 import {
   Program,
   Statement,
@@ -14,18 +16,10 @@ import {
   BreakStmt,
   ContinueStmt,
   BlockStmt,
-  ExpressionStmt,
   StructStmt,
-  IdentifierExpr,
-  BinaryExpr,
-  UnaryExpr,
   CallExpr,
-  IndexExpr,
-  MemberExpr,
-  ArrayExpr,
-  ObjectExpr,
   FunctionExpr,
-  PrintExpr,
+  Parameter,
 } from '../ast/index.js';
 
 export type SymbolKind = 'variable' | 'function' | 'parameter' | 'struct' | 'builtin';
@@ -38,43 +32,11 @@ export interface SymbolInfo {
   minParamCount?: number;
 }
 
-export class SemanticError extends Error {
-  constructor(
-    message: string,
-    public readonly loc: SourceLocation,
-    public readonly source?: string,
-    public readonly hint?: string,
-  ) {
-    super(message);
+export class SemanticError extends CodeTimeError {
+  constructor(message: string, loc: SourceLocation, source?: string, hint?: string, severity: Severity = 'error') {
+    super(message, loc, source, hint);
     this.name = 'SemanticError';
-  }
-
-  /** Format the error with source context and helpful explanation */
-  format(src?: string): string {
-    const sourceText = src ?? this.source;
-    if (!sourceText) {
-      return `SemanticError [line ${this.loc.line}, col ${this.loc.column}]: ${this.message}`;
-    }
-
-    const lines = sourceText.split('\n');
-    const lineNum = this.loc.line;
-    const colNum = this.loc.column;
-    const srcLine = lines[lineNum - 1] ?? '';
-    const caret = ' '.repeat(Math.max(0, colNum - 1)) + '^';
-
-    const parts = [
-      `SemanticError: ${this.message}`,
-      `  --> line ${lineNum}, column ${colNum}`,
-      '',
-      `  ${lineNum} | ${srcLine}`,
-      `    | ${caret}`,
-    ];
-
-    if (this.hint) {
-      parts.push('', `Explanation: ${this.hint}`);
-    }
-
-    return parts.join('\n');
+    this.severity = severity;
   }
 }
 
@@ -117,8 +79,10 @@ export class Scope {
     return false;
   }
 
+  /** True if a `break`/`continue` here would target a loop. Loops do not reach across function boundaries. */
   public isInsideLoop(): boolean {
     if (this.type === ScopeType.LOOP) return true;
+    if (this.type === ScopeType.FUNCTION) return false;
     if (this.parent) return this.parent.isInsideLoop();
     return false;
   }
@@ -126,6 +90,7 @@ export class Scope {
 
 export interface SemanticResult {
   errors: SemanticError[];
+  warnings: SemanticError[];
   rootScope: Scope;
 }
 
@@ -133,6 +98,7 @@ export class SemanticAnalyzer {
   private currentScope: Scope;
   private rootScope: Scope;
   private errors: SemanticError[] = [];
+  private warnings: SemanticError[] = [];
   private source?: string;
 
   constructor(source?: string) {
@@ -143,17 +109,7 @@ export class SemanticAnalyzer {
   }
 
   private initBuiltins(): void {
-    const builtins: [string, number][] = [
-      ['print', 0],   // variadic
-      ['len', 1],
-      ['typeof', 1],
-      ['int', 1],
-      ['float', 1],
-      ['str', 1],
-      ['bool', 1],
-    ];
-
-    for (const [name, arity] of builtins) {
+    for (const { name, arity } of BUILTIN_SIGNATURES) {
       this.rootScope.define({
         name,
         kind: 'builtin',
@@ -166,6 +122,7 @@ export class SemanticAnalyzer {
 
   public analyze(program: Program): SemanticResult {
     this.errors = [];
+    this.warnings = [];
     this.rootScope = new Scope(ScopeType.GLOBAL);
     this.currentScope = this.rootScope;
     this.initBuiltins();
@@ -186,6 +143,7 @@ export class SemanticAnalyzer {
 
     return {
       errors: this.errors,
+      warnings: this.warnings,
       rootScope: this.rootScope,
     };
   }
@@ -214,6 +172,8 @@ export class SemanticAnalyzer {
       name: stmt.name,
       kind: 'struct',
       loc: stmt.loc,
+      paramCount: stmt.fields.length,
+      minParamCount: stmt.fields.length,
     });
 
     if (!ok) {
@@ -277,7 +237,10 @@ export class SemanticAnalyzer {
         this.analyzeExpression(stmt.expression);
         break;
       case 'StructStmt':
-        // Already declared in pass 1
+        // Top-level structs are hoisted in pass 1; nested ones are declared here.
+        if (this.currentScope !== this.rootScope) {
+          this.declareStruct(stmt);
+        }
         break;
     }
   }
@@ -285,6 +248,15 @@ export class SemanticAnalyzer {
   private analyzeLet(stmt: LetStmt): void {
     if (stmt.initializer) {
       this.analyzeExpression(stmt.initializer);
+    }
+
+    const outer = this.currentScope.parent?.resolve(stmt.name);
+    if (outer && outer.kind !== 'builtin' && !this.currentScope.symbols.has(stmt.name)) {
+      this.warning(
+        `'${stmt.name}' shadows a ${outer.kind} declared in an outer scope (line ${outer.loc.line}).`,
+        stmt.loc,
+        `Inside this block, '${stmt.name}' refers to the new variable; the outer one is unchanged. Rename it if that is not intended.`,
+      );
     }
 
     const ok = this.currentScope.define({
@@ -348,28 +320,7 @@ export class SemanticAnalyzer {
     }
     // Enter function scope
     this.enterScope(ScopeType.FUNCTION);
-
-    const paramSet = new Set<string>();
-    for (const param of stmt.params) {
-      if (param.defaultValue) {
-        this.analyzeExpression(param.defaultValue);
-      }
-
-      if (paramSet.has(param.name)) {
-        this.error(
-          `Duplicate parameter name '${param.name}' in function '${stmt.name}'.`,
-          param.loc,
-          `Function parameters must be uniquely named.`,
-        );
-      }
-      paramSet.add(param.name);
-
-      this.currentScope.define({
-        name: param.name,
-        kind: 'parameter',
-        loc: param.loc,
-      });
-    }
+    this.analyzeParams(stmt.params, `function '${stmt.name}'`);
 
     // Analyze body statements in function scope
     for (const s of stmt.body.body) {
@@ -521,7 +472,7 @@ export class SemanticAnalyzer {
     // If callee is a statically known identifier, check arity
     if (expr.callee.kind === 'IdentifierExpr') {
       const symbol = this.currentScope.resolve(expr.callee.name);
-      if (symbol && (symbol.kind === 'function' || symbol.kind === 'builtin')) {
+      if (symbol && (symbol.kind === 'function' || symbol.kind === 'builtin' || symbol.kind === 'struct')) {
         if (symbol.name === 'print') {
           // print is variadic (takes 0 or more arguments)
           return;
@@ -543,30 +494,34 @@ export class SemanticAnalyzer {
     }
   }
 
-  private analyzeLambda(expr: FunctionExpr): void {
-    this.enterScope(ScopeType.FUNCTION);
-    const paramSet = new Set<string>();
-
-    for (const param of expr.params) {
+  /**
+   * Declare parameters in order. A default value is evaluated at call time
+   * inside the callee, so it may reference any parameter declared before it.
+   */
+  private analyzeParams(params: Parameter[], fnLabel: string): void {
+    for (const param of params) {
       if (param.defaultValue) {
         this.analyzeExpression(param.defaultValue);
       }
 
-      if (paramSet.has(param.name)) {
-        this.error(
-          `Duplicate parameter name '${param.name}' in anonymous function.`,
-          param.loc,
-          `Parameters must have unique names.`,
-        );
-      }
-      paramSet.add(param.name);
-
-      this.currentScope.define({
+      const ok = this.currentScope.define({
         name: param.name,
         kind: 'parameter',
         loc: param.loc,
       });
+      if (!ok) {
+        this.error(
+          `Duplicate parameter name '${param.name}' in ${fnLabel}.`,
+          param.loc,
+          `Function parameters must be uniquely named.`,
+        );
+      }
     }
+  }
+
+  private analyzeLambda(expr: FunctionExpr): void {
+    this.enterScope(ScopeType.FUNCTION);
+    this.analyzeParams(expr.params, 'anonymous function');
 
     for (const s of expr.body.body) {
       this.analyzeStatement(s);
@@ -589,5 +544,9 @@ export class SemanticAnalyzer {
 
   private error(message: string, loc: SourceLocation, hint?: string): void {
     this.errors.push(new SemanticError(message, loc, this.source, hint));
+  }
+
+  private warning(message: string, loc: SourceLocation, hint?: string): void {
+    this.warnings.push(new SemanticError(message, loc, this.source, hint, 'warning'));
   }
 }

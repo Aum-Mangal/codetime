@@ -59,6 +59,10 @@ export enum OpCode {
   // Built-in operations
   OP_PRINT          = 40,
   OP_HALT           = 41,
+
+  // Added for compound index assignment and default parameters
+  OP_DUP2                  = 42, // [a, b] -> [a, b, a, b]
+  OP_JUMP_IF_ARG_PRESENT   = 43, // slot, hi, lo: skip default-value code when the argument was passed
 }
 
 export class Chunk {
@@ -66,12 +70,25 @@ export class Chunk {
   public constants: Value[] = [];
   public locations: SourceLocation[] = [];
 
+  /** Index of already-added string/number constants, so each appears once in the pool. */
+  private primitiveIndex = new Map<string | number, number>();
+
   public write(byte: number, loc: SourceLocation): void {
     this.code.push(byte);
     this.locations.push(loc);
   }
 
   public addConstant(val: Value): number {
+    const dedupable = typeof val === 'string' || typeof val === 'number';
+    if (dedupable) {
+      // Prefix strings so the number 1 and the string "1" get different keys.
+      const key = typeof val === 'string' ? `s:${val}` : val;
+      const existing = this.primitiveIndex.get(key);
+      if (existing !== undefined) return existing;
+      this.constants.push(val);
+      this.primitiveIndex.set(key, this.constants.length - 1);
+      return this.constants.length - 1;
+    }
     this.constants.push(val);
     return this.constants.length - 1;
   }
@@ -252,6 +269,16 @@ export function disassembleInstruction(chunk: Chunk, offset: number): { output: 
     }
     case OpCode.OP_HALT:
       return { output: `${prefix}OP_HALT`, nextOffset: offset + 1 };
+    case OpCode.OP_DUP2:
+      return { output: `${prefix}OP_DUP2`, nextOffset: offset + 1 };
+    case OpCode.OP_JUMP_IF_ARG_PRESENT: {
+      const slot = chunk.code[offset + 1]!;
+      const jump = (chunk.code[offset + 2]! << 8) | chunk.code[offset + 3]!;
+      return {
+        output: `${prefix}OP_JUMP_IF_ARG_PRESENT slot ${slot} -> ${(offset + 4 + jump).toString().padStart(4, '0')}`,
+        nextOffset: offset + 4,
+      };
+    }
 
     default:
       return { output: `${prefix}UNKNOWN_OP (${op})`, nextOffset: offset + 1 };

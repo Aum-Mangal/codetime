@@ -13,21 +13,16 @@ import {
   ForInStmt,
   BreakStmt,
   ContinueStmt,
-  BlockStmt,
-  ExpressionStmt,
-  IdentifierExpr,
+  StructStmt,
   BinaryExpr,
   UnaryExpr,
   CallExpr,
-  IndexExpr,
-  MemberExpr,
-  ArrayExpr,
-  ObjectExpr,
   FunctionExpr,
-  PrintExpr,
+  Parameter,
 } from '../ast/index.js';
 import { Chunk, OpCode } from './chunk.js';
-import type { FunctionValue } from '../vm/value.js';
+import type { FunctionValue, StructTypeValue } from '../vm/value.js';
+import { CompileError } from '../diagnostics/errors.js';
 
 export interface Local {
   name: string;
@@ -43,9 +38,16 @@ export interface UpvalueDesc {
 export type FunctionType = 'script' | 'function' | 'lambda';
 
 export interface LoopContext {
+  /** Where `continue` loops back to when the loop has no separate continue target (while). */
   startIp: number;
+  /** Scope depth of the loop itself; locals deeper than this belong to the body. */
   depth: number;
   breakJumps: number[];
+  /**
+   * Forward jumps emitted by `continue` in loops whose continue target comes
+   * after the body (for-in: the index increment). Null for while loops.
+   */
+  continueJumps: number[] | null;
 }
 
 export class BytecodeCompiler {
@@ -112,7 +114,7 @@ export class BytecodeCompiler {
   private patchJump(offset: number): void {
     const jump = this.chunk.code.length - offset - 2;
     if (jump > 0xffff) {
-      throw new Error(`Too much code to jump over (jump offset ${jump}).`);
+      throw new CompileError(`Too much code to jump over (jump offset ${jump}).`, this.chunk.locations[offset]!);
     }
     this.chunk.code[offset] = (jump >> 8) & 0xff;
     this.chunk.code[offset + 1] = jump & 0xff;
@@ -122,7 +124,7 @@ export class BytecodeCompiler {
     this.emitByte(OpCode.OP_LOOP, loc);
     const offset = this.chunk.code.length - loopStart + 2;
     if (offset > 0xffff) {
-      throw new Error(`Loop body too large.`);
+      throw new CompileError(`Loop body too large.`, loc);
     }
     this.emitByte((offset >> 8) & 0xff, loc);
     this.emitByte(offset & 0xff, loc);
@@ -138,11 +140,24 @@ export class BytecodeCompiler {
     this.scopeDepth--;
     while (this.locals.length > 0 && this.locals[this.locals.length - 1]!.depth > this.scopeDepth) {
       const local = this.locals.pop()!;
-      if (local.isCaptured) {
-        this.emitByte(OpCode.OP_CLOSE_UPVALUE, loc);
-      } else {
-        this.emitByte(OpCode.OP_POP, loc);
-      }
+      this.emitDiscardLocal(local, loc);
+    }
+  }
+
+  /** Remove a local from the runtime stack, closing it first if a closure captured it. */
+  private emitDiscardLocal(local: Local, loc: SourceLocation): void {
+    this.emitByte(local.isCaptured ? OpCode.OP_CLOSE_UPVALUE : OpCode.OP_POP, loc);
+  }
+
+  /**
+   * Emit cleanup for a `break`/`continue` jumping out of the body scopes of a
+   * loop: every local deeper than the loop is popped (or closed, if captured)
+   * at runtime. The compile-time locals are left in place because the code
+   * after the jump in the same block still uses them.
+   */
+  private emitLoopExit(loop: LoopContext, loc: SourceLocation): void {
+    for (let i = this.locals.length - 1; i >= 0 && this.locals[i]!.depth > loop.depth; i--) {
+      this.emitDiscardLocal(this.locals[i]!, loc);
     }
   }
 
@@ -238,8 +253,25 @@ export class BytecodeCompiler {
         this.emitByte(OpCode.OP_POP, stmt.loc);
         break;
       case 'StructStmt':
-        // Struct metadata can be registered as an object template
+        this.compileStruct(stmt);
         break;
+    }
+  }
+
+  /** A struct declaration binds its name to an immutable StructTypeValue; calling it constructs an instance. */
+  private compileStruct(stmt: StructStmt): void {
+    const structValue: StructTypeValue = { kind: 'struct', name: stmt.name, fields: [...stmt.fields] };
+    this.emitConstant(structValue, stmt.loc);
+    this.declareVariable(stmt.name, stmt.loc);
+  }
+
+  /** Bind the value on top of the stack to `name` as a local (in a scope) or a global (at top level). */
+  private declareVariable(name: string, loc: SourceLocation): void {
+    if (this.scopeDepth > 0) {
+      this.addLocal(name);
+    } else {
+      const constIdx = this.chunk.addConstant(name);
+      this.emitBytes(OpCode.OP_DEFINE_GLOBAL, constIdx, loc);
     }
   }
 
@@ -250,12 +282,7 @@ export class BytecodeCompiler {
       this.emitByte(OpCode.OP_NULL, stmt.loc);
     }
 
-    if (this.scopeDepth > 0) {
-      this.addLocal(stmt.name);
-    } else {
-      const constIdx = this.chunk.addConstant(stmt.name);
-      this.emitBytes(OpCode.OP_DEFINE_GLOBAL, constIdx, stmt.loc);
-    }
+    this.declareVariable(stmt.name, stmt.loc);
   }
 
   private compileAssign(stmt: AssignStmt): void {
@@ -313,24 +340,23 @@ export class BytecodeCompiler {
       this.compileVariableSet(name, stmt.loc);
       this.emitByte(OpCode.OP_POP, stmt.loc);
     } else if (stmt.target.kind === 'IndexExpr') {
+      // Evaluate obj and index once, then reuse them for both the read and the write.
       this.compileExpression(stmt.target.object);
-      this.compileExpression(stmt.target.index);
-      // Stack: [obj, index]
-      this.emitByte(OpCode.OP_DUP, stmt.loc); // [obj, index, index]
-      // To get current value, we can use a sub-expression or index get
-      // Stack layout for OP_SET_INDEX: [obj, index, value]
-      this.compileExpression(stmt.target); // computes obj[index]
-      this.compileExpression(stmt.value);
-      this.emitByte(opCode, stmt.loc);
-      this.emitByte(OpCode.OP_SET_INDEX, stmt.loc);
+      this.compileExpression(stmt.target.index);   // [obj, index]
+      this.emitByte(OpCode.OP_DUP2, stmt.loc);      // [obj, index, obj, index]
+      this.emitByte(OpCode.OP_GET_INDEX, stmt.loc); // [obj, index, current]
+      this.compileExpression(stmt.value);           // [obj, index, current, rhs]
+      this.emitByte(opCode, stmt.loc);              // [obj, index, result]
+      this.emitByte(OpCode.OP_SET_INDEX, stmt.loc); // [result]
       this.emitByte(OpCode.OP_POP, stmt.loc);
     } else if (stmt.target.kind === 'MemberExpr') {
-      this.compileExpression(stmt.target.object);
-      this.compileExpression(stmt.target);
-      this.compileExpression(stmt.value);
-      this.emitByte(opCode, stmt.loc);
       const constIdx = this.chunk.addConstant(stmt.target.property);
-      this.emitBytes(OpCode.OP_SET_PROPERTY, constIdx, stmt.loc);
+      this.compileExpression(stmt.target.object);             // [obj]
+      this.emitByte(OpCode.OP_DUP, stmt.loc);                  // [obj, obj]
+      this.emitBytes(OpCode.OP_GET_PROPERTY, constIdx, stmt.loc); // [obj, current]
+      this.compileExpression(stmt.value);                      // [obj, current, rhs]
+      this.emitByte(opCode, stmt.loc);                         // [obj, result]
+      this.emitBytes(OpCode.OP_SET_PROPERTY, constIdx, stmt.loc); // [result]
       this.emitByte(OpCode.OP_POP, stmt.loc);
     }
   }
@@ -366,46 +392,77 @@ export class BytecodeCompiler {
   }
 
   private compileFunctionStmt(stmt: FunctionStmt): void {
-    const fnCompiler = new BytecodeCompiler('function', stmt.name, this);
-    fnCompiler.arity = stmt.params.length;
-    fnCompiler.minArity = stmt.params.filter(p => !p.defaultValue).length;
+    this.compileFunction('function', stmt.name, stmt.params, stmt.body.body, stmt.loc);
+    this.declareVariable(stmt.name, stmt.loc);
+  }
+
+  /**
+   * Compile a function body in a child compiler and emit OP_CLOSURE for it.
+   * Shared by named functions and lambdas.
+   *
+   * Calling convention: the VM fills every missing trailing argument with an
+   * internal "missing" marker, so parameter slots are always 1..arity. The
+   * prologue then replaces each marker with its default value, evaluated in the
+   * callee so defaults can reference earlier parameters.
+   */
+  private compileFunction(
+    type: FunctionType,
+    name: string,
+    params: Parameter[],
+    body: Statement[],
+    loc: SourceLocation,
+  ): void {
+    const fnCompiler = new BytecodeCompiler(type, name, this);
+    fnCompiler.arity = params.length;
+    fnCompiler.minArity = params.filter(p => !p.defaultValue).length;
     fnCompiler.beginScope();
 
-    for (const param of stmt.params) {
+    for (const param of params) {
       fnCompiler.addLocal(param.name);
     }
 
-    for (const s of stmt.body.body) {
+    params.forEach((param, i) => {
+      if (!param.defaultValue) return;
+      const slot = i + 1; // slot 0 holds the function itself
+      fnCompiler.emitByte(OpCode.OP_JUMP_IF_ARG_PRESENT, param.loc);
+      fnCompiler.emitByte(slot, param.loc);
+      const skip = fnCompiler.emitJumpOperand(param.loc);
+      fnCompiler.compileExpression(param.defaultValue);
+      fnCompiler.emitBytes(OpCode.OP_SET_LOCAL, slot, param.loc);
+      fnCompiler.emitByte(OpCode.OP_POP, param.loc);
+      fnCompiler.patchJump(skip);
+    });
+
+    for (const s of body) {
       fnCompiler.compileStatement(s);
     }
 
-    fnCompiler.emitReturn(stmt.loc);
-    const fnChunk = fnCompiler.chunk;
+    fnCompiler.emitReturn(loc);
 
     const fnValue: FunctionValue = {
       kind: 'function',
-      name: stmt.name,
+      name,
       arity: fnCompiler.arity,
       minArity: fnCompiler.minArity,
-      chunk: fnChunk,
+      chunk: fnCompiler.chunk,
       upvalues: fnCompiler.upvalues,
       localNames: fnCompiler.locals.map(l => l.name),
     };
 
     const constIdx = this.chunk.addConstant(fnValue);
-    this.emitBytes(OpCode.OP_CLOSURE, constIdx, stmt.loc);
+    this.emitBytes(OpCode.OP_CLOSURE, constIdx, loc);
 
     for (const upval of fnCompiler.upvalues) {
-      this.emitByte(upval.isLocal ? 1 : 0, stmt.loc);
-      this.emitByte(upval.index, stmt.loc);
+      this.emitByte(upval.isLocal ? 1 : 0, loc);
+      this.emitByte(upval.index, loc);
     }
+  }
 
-    if (this.scopeDepth > 0) {
-      this.addLocal(stmt.name);
-    } else {
-      const nameIdx = this.chunk.addConstant(stmt.name);
-      this.emitBytes(OpCode.OP_DEFINE_GLOBAL, nameIdx, stmt.loc);
-    }
+  /** Emit a 2-byte placeholder jump operand and return its offset for patchJump. */
+  private emitJumpOperand(loc: SourceLocation): number {
+    this.emitByte(0xff, loc);
+    this.emitByte(0xff, loc);
+    return this.chunk.code.length - 2;
   }
 
   private compileReturn(stmt: ReturnStmt): void {
@@ -443,6 +500,7 @@ export class BytecodeCompiler {
       startIp: loopStart,
       depth: this.scopeDepth,
       breakJumps: [],
+      continueJumps: null,
     };
     this.loops.push(loopCtx);
 
@@ -465,18 +523,25 @@ export class BytecodeCompiler {
     this.loops.pop();
   }
 
+  /**
+   * Desugars `for item in iterable { body }` into:
+   *
+   *     { let $iterable = iterable; let $index = 0; let item = null
+   *       loop:     if !($index < len($iterable)) goto exit
+   *                 item = $iterable[$index]
+   *                 { body }                 <- own scope, popped every iteration
+   *       continue: $index += 1              <- `continue` jumps here
+   *                 goto loop
+   *       exit: }                            <- `break` jumps here
+   */
   private compileForIn(stmt: ForInStmt): void {
-    // Desugar for item in iterable { body }
-    // 1. Evaluate iterable: stack has [iterable]
     this.beginScope();
     this.compileExpression(stmt.iterable);
     const iterableSlot = this.addLocal('$iterable');
 
-    // 2. Initialize index variable $i = 0
     this.emitConstant(0, stmt.loc);
     const indexSlot = this.addLocal('$index');
 
-    // 3. Declare user loop variable
     this.emitByte(OpCode.OP_NULL, stmt.loc);
     const itemSlot = this.addLocal(stmt.variable);
 
@@ -485,6 +550,7 @@ export class BytecodeCompiler {
       startIp: loopStart,
       depth: this.scopeDepth,
       breakJumps: [],
+      continueJumps: [],
     };
     this.loops.push(loopCtx);
 
@@ -506,12 +572,17 @@ export class BytecodeCompiler {
     this.emitBytes(OpCode.OP_SET_LOCAL, itemSlot, stmt.loc);
     this.emitByte(OpCode.OP_POP, stmt.loc);
 
-    // Body
+    // Body, in its own scope so its locals are popped at the end of every iteration
+    this.beginScope();
     for (const s of stmt.body.body) {
       this.compileStatement(s);
     }
+    this.endScope(stmt.body.loc);
 
-    // Increment index: $index += 1
+    // Continue target: increment index ($index += 1)
+    for (const continueJump of loopCtx.continueJumps!) {
+      this.patchJump(continueJump);
+    }
     this.emitBytes(OpCode.OP_GET_LOCAL, indexSlot, stmt.loc);
     this.emitConstant(1, stmt.loc);
     this.emitByte(OpCode.OP_ADD, stmt.loc);
@@ -532,30 +603,28 @@ export class BytecodeCompiler {
   }
 
   private compileBreak(stmt: BreakStmt): void {
-    if (this.loops.length === 0) {
-      throw new Error(`'break' used outside of loop.`);
-    }
-    const currentLoop = this.loops[this.loops.length - 1]!;
-    // Clean up local variables up to loop depth before breaking
-    let count = 0;
-    for (let i = this.locals.length - 1; i >= 0; i--) {
-      if (this.locals[i]!.depth > currentLoop.depth) count++;
-      else break;
-    }
-    for (let i = 0; i < count; i++) {
-      this.emitByte(OpCode.OP_POP, stmt.loc);
-    }
-
-    const breakJump = this.emitJump(OpCode.OP_JUMP, stmt.loc);
-    currentLoop.breakJumps.push(breakJump);
+    const currentLoop = this.currentLoop('break', stmt.loc);
+    this.emitLoopExit(currentLoop, stmt.loc);
+    currentLoop.breakJumps.push(this.emitJump(OpCode.OP_JUMP, stmt.loc));
   }
 
   private compileContinue(stmt: ContinueStmt): void {
-    if (this.loops.length === 0) {
-      throw new Error(`'continue' used outside of loop.`);
+    const currentLoop = this.currentLoop('continue', stmt.loc);
+    this.emitLoopExit(currentLoop, stmt.loc);
+    if (currentLoop.continueJumps) {
+      currentLoop.continueJumps.push(this.emitJump(OpCode.OP_JUMP, stmt.loc));
+    } else {
+      this.emitLoop(currentLoop.startIp, stmt.loc);
     }
-    const currentLoop = this.loops[this.loops.length - 1]!;
-    this.emitLoop(currentLoop.startIp, stmt.loc);
+  }
+
+  private currentLoop(keyword: string, loc: SourceLocation): LoopContext {
+    const loop = this.loops[this.loops.length - 1];
+    if (!loop) {
+      // The semantic analyzer rejects this first; this guards direct compiler use.
+      throw new CompileError(`'${keyword}' used outside of loop.`, loc);
+    }
+    return loop;
   }
 
   // ── Expressions ────────────────────────────────────────────────────────────
@@ -683,38 +752,6 @@ export class BytecodeCompiler {
   }
 
   private compileLambda(expr: FunctionExpr): void {
-    const fnCompiler = new BytecodeCompiler('lambda', 'anonymous', this);
-    fnCompiler.arity = expr.params.length;
-    fnCompiler.minArity = expr.params.filter(p => !p.defaultValue).length;
-    fnCompiler.beginScope();
-
-    for (const param of expr.params) {
-      fnCompiler.addLocal(param.name);
-    }
-
-    for (const s of expr.body.body) {
-      fnCompiler.compileStatement(s);
-    }
-
-    fnCompiler.emitReturn(expr.loc);
-    const fnChunk = fnCompiler.chunk;
-
-    const fnValue: FunctionValue = {
-      kind: 'function',
-      name: 'anonymous',
-      arity: fnCompiler.arity,
-      minArity: fnCompiler.minArity,
-      chunk: fnChunk,
-      upvalues: fnCompiler.upvalues,
-      localNames: fnCompiler.locals.map(l => l.name),
-    };
-
-    const constIdx = this.chunk.addConstant(fnValue);
-    this.emitBytes(OpCode.OP_CLOSURE, constIdx, expr.loc);
-
-    for (const upval of fnCompiler.upvalues) {
-      this.emitByte(upval.isLocal ? 1 : 0, expr.loc);
-      this.emitByte(upval.index, expr.loc);
-    }
+    this.compileFunction('lambda', 'anonymous', expr.params, expr.body.body, expr.loc);
   }
 }

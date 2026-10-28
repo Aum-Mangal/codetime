@@ -1,13 +1,9 @@
-import { Lexer } from '../lexer/lexer.js';
-import { Parser } from '../parser/parser.js';
-import { SemanticAnalyzer } from '../semantic/analyzer.js';
-import { BytecodeCompiler } from '../codegen/compiler.js';
+import { compile } from '../pipeline.js';
 import { OpCode } from '../codegen/chunk.js';
 import {
   Value,
   ClosureValue,
   FunctionValue,
-  NativeFunctionValue,
   Upvalue,
   ArrayValue,
   ObjectValue,
@@ -15,8 +11,10 @@ import {
   valuesEqual,
   valueToString,
   valueType,
+  instantiateStruct,
 } from '../vm/value.js';
-import { RuntimeError, CallFrame } from '../vm/vm.js';
+import { createNatives, getBuiltinProperty, BUILTIN_NAMES } from '../vm/natives.js';
+import { CallFrame } from '../vm/vm.js';
 import { SourceLocation } from '../lexer/token.js';
 import {
   ExecutionSnapshot,
@@ -75,19 +73,11 @@ export class TimeTravelDebugger {
     this.recordingErrorMessage = '';
 
     // ── 1. Full compiler pipeline ──────────────────────────────────────────
-    const tokens = new Lexer(this.source).tokenize();
-    const parser = new Parser(tokens, this.source);
-    const ast = parser.parse();
-
-    const analyzer = new SemanticAnalyzer(this.source);
-    const semRes = analyzer.analyze(ast);
-    if (semRes.errors.length > 0) {
-      const err = semRes.errors[0]!;
-      throw new RuntimeError(err.message, err.loc, [], this.source);
+    const compiled = compile(this.source);
+    if (!compiled.chunk) {
+      throw compiled.diagnostics[0]!;
     }
-
-    const compiler = new BytecodeCompiler('script', 'main');
-    const chunk = compiler.compile(ast);
+    const chunk = compiled.chunk;
 
     // ── 2. Bootstrap VM ────────────────────────────────────────────────────
     this.initGlobals();
@@ -99,7 +89,7 @@ export class TimeTravelDebugger {
       minArity: 0,
       chunk,
       upvalues: [],
-      localNames: compiler.locals.map(l => l.name),
+      localNames: [''],
     };
 
     const mainClosure: ClosureValue = {
@@ -369,10 +359,9 @@ export class TimeTravelDebugger {
 
   private captureGlobals(prevGlobals: Map<string, string>): VariableSnapshot[] {
     const result: VariableSnapshot[] = [];
-    const internalBuiltins = new Set(['print', 'len', 'typeof', 'int', 'float', 'str', 'bool']);
 
     for (const [name, val] of this.globals.entries()) {
-      if (internalBuiltins.has(name)) continue;
+      if (BUILTIN_NAMES.has(name)) continue;
       const displayValue = valueToString(val);
       result.push({
         name,
@@ -386,19 +375,29 @@ export class TimeTravelDebugger {
     return result;
   }
 
-  private cloneValue(v: Value): Value {
+  /**
+   * Deep-copy a value for a snapshot. `copies` maps each original container to
+   * its copy, so shared references stay shared and cycles terminate.
+   */
+  private cloneValue(v: Value, copies: Map<object, Value> = new Map()): Value {
     if (v === null || typeof v !== 'object') return v;
+    const existing = copies.get(v);
+    if (existing) return existing;
     if (v.kind === 'array') {
-      return { kind: 'array', elements: v.elements.map(e => this.cloneValue(e)) };
+      const copy: ArrayValue = { kind: 'array', elements: [] };
+      copies.set(v, copy);
+      for (const e of v.elements) copy.elements.push(this.cloneValue(e, copies));
+      return copy;
     }
     if (v.kind === 'object') {
-      const fields = new Map<string, Value>();
+      const copy: ObjectValue = { kind: 'object', fields: new Map(), structName: v.structName };
+      copies.set(v, copy);
       for (const [k, val] of v.fields.entries()) {
-        fields.set(k, this.cloneValue(val));
+        copy.fields.set(k, this.cloneValue(val, copies));
       }
-      return { kind: 'object', fields };
+      return copy;
     }
-    // closures / functions / natives: immutable, share reference
+    // closures / functions / natives / struct types: immutable, share reference
     return v;
   }
 
@@ -426,39 +425,9 @@ export class TimeTravelDebugger {
   // ── VM Instruction Execution Engine ──────────────────────────────────────────
 
   private initGlobals(): void {
-    const def = (name: string, arity: number, fn: (args: Value[]) => Value) => {
-      const nativeVal: NativeFunctionValue = { kind: 'native', name, arity, fn };
+    for (const [name, nativeVal] of createNatives(line => this.output.push(line))) {
       this.globals.set(name, nativeVal);
-    };
-
-    def('print', -1, (args) => {
-      this.output.push(args.map(a => valueToString(a)).join(' '));
-      return null;
-    });
-    def('len', 1, (args) => {
-      const a = args[0]!;
-      if (typeof a === 'string') return a.length;
-      if (typeof a === 'object' && a !== null && a.kind === 'array') return a.elements.length;
-      if (typeof a === 'object' && a !== null && a.kind === 'object') return a.fields.size;
-      throw new Error(`'len()' not supported for type '${valueType(a)}'.`);
-    });
-    def('typeof', 1, (args) => valueType(args[0]!));
-    def('int', 1, (args) => {
-      const a = args[0]!;
-      if (typeof a === 'number') return Math.trunc(a);
-      if (typeof a === 'string') return parseInt(a, 10);
-      if (typeof a === 'boolean') return a ? 1 : 0;
-      return 0;
-    });
-    def('float', 1, (args) => {
-      const a = args[0]!;
-      if (typeof a === 'number') return a;
-      if (typeof a === 'string') return parseFloat(a);
-      if (typeof a === 'boolean') return a ? 1.0 : 0.0;
-      return 0.0;
-    });
-    def('str', 1, (args) => valueToString(args[0]!));
-    def('bool', 1, (args) => isTruthy(args[0]!));
+    }
   }
 
   private executeInstruction(): DebuggerEvent {
@@ -496,6 +465,22 @@ export class TimeTravelDebugger {
       case OpCode.OP_DUP:
         this.push(this.peek(0));
         return mkEvent('step', 'Duplicate stack top');
+      case OpCode.OP_DUP2: {
+        const a = this.peek(1), b = this.peek(0);
+        this.push(a);
+        this.push(b);
+        return mkEvent('step', 'Duplicate top two stack values');
+      }
+      case OpCode.OP_JUMP_IF_ARG_PRESENT: {
+        const slot = ch.code[frame.ip++]!;
+        const offset = (ch.code[frame.ip++]! << 8) | ch.code[frame.ip++]!;
+        const name = frame.closure.fn.localNames?.[slot] ?? `local_${slot}`;
+        if (this.stack[frame.slots + slot] !== undefined) {
+          frame.ip += offset;
+          return mkEvent('branch', `Argument ${name} was passed`);
+        }
+        return mkEvent('branch', `Argument ${name} missing → use default`);
+      }
 
       // ── Variable access ─────────────────────────────────────────────────
       case OpCode.OP_GET_LOCAL: {
@@ -677,6 +662,13 @@ export class TimeTravelDebugger {
             return mkEvent('step', `obj["${key}"] → ${valueToString(val)}`);
           }
         }
+        if (typeof target === 'string') {
+          if (typeof index !== 'number') throw new Error(`String index must be a number.`);
+          const idx = Math.trunc(index);
+          if (idx < 0 || idx >= target.length) throw new Error(`String index out of bounds: ${idx}.`);
+          this.push(target[idx]!);
+          return mkEvent('step', `str[${idx}] → ${target[idx]}`);
+        }
         throw new Error(`Cannot index into ${valueType(target)}.`);
       }
       case OpCode.OP_SET_INDEX: {
@@ -697,23 +689,15 @@ export class TimeTravelDebugger {
       case OpCode.OP_GET_PROPERTY: {
         const propName = ch.constants[ch.code[frame.ip++]!] as string;
         const target = this.pop();
-        if (typeof target === 'object' && target !== null) {
-          if (target.kind === 'array') {
-            if (propName === 'length') { this.push(target.elements.length); return mkEvent('step', `arr.length → ${target.elements.length}`); }
-            if (propName === 'push') {
-              this.push({ kind: 'native', name: 'push', arity: 1, fn: (a) => { target.elements.push(a[0]!); return target.elements.length; } });
-              return mkEvent('step', 'arr.push ref');
-            }
-            if (propName === 'pop') {
-              this.push({ kind: 'native', name: 'pop', arity: 0, fn: () => target.elements.pop() ?? null });
-              return mkEvent('step', 'arr.pop ref');
-            }
-          }
-          if (target.kind === 'object') {
-            const val = target.fields.get(propName) ?? null;
-            this.push(val);
-            return mkEvent('step', `.${propName} → ${valueToString(val)}`);
-          }
+        if (typeof target === 'object' && target !== null && target.kind === 'object') {
+          const val = target.fields.get(propName) ?? null;
+          this.push(val);
+          return mkEvent('step', `.${propName} → ${valueToString(val)}`);
+        }
+        const builtin = getBuiltinProperty(target, propName);
+        if (builtin !== undefined) {
+          this.push(builtin);
+          return mkEvent('step', `.${propName} → ${valueToString(builtin)}`);
         }
         throw new Error(`Property '${propName}' not found on ${valueType(target)}.`);
       }
@@ -762,13 +746,28 @@ export class TimeTravelDebugger {
         this.push(callee.fn(args));
         return;
       }
+      if (callee.kind === 'struct') {
+        if (argCount !== callee.fields.length) {
+          throw new Error(`Struct '${callee.name}' expects ${callee.fields.length} arguments, got ${argCount}.`);
+        }
+        const args = this.stack.splice(this.stack.length - argCount, argCount);
+        this.pop();
+        this.push(instantiateStruct(callee, args));
+        return;
+      }
     }
     throw new Error(`Cannot call ${valueType(callee)}.`);
   }
 
   private call(closure: ClosureValue, argCount: number): void {
+    if (argCount < closure.fn.minArity || argCount > closure.fn.arity) {
+      throw new Error(`Function '${closure.fn.name}' expects ${closure.fn.arity} arguments, got ${argCount}.`);
+    }
     if (this.frames.length >= FRAMES_MAX) throw new Error('Stack overflow (max call depth exceeded).');
-    this.frames.push({ closure, ip: 0, slots: this.stack.length - argCount - 1 });
+    for (let i = argCount; i < closure.fn.arity; i++) {
+      this.stack.push(undefined as unknown as Value); // missing optional argument
+    }
+    this.frames.push({ closure, ip: 0, slots: this.stack.length - closure.fn.arity - 1 });
   }
 
   private captureUpvalue(localIndex: number): Upvalue {

@@ -4,7 +4,7 @@
  */
 
 import type {
-  ASTNode, Program, Statement, Expression,
+  ASTNode, Program,
   BinaryExpr, UnaryExpr, CallExpr, IndexExpr, MemberExpr,
   ArrayExpr, ObjectExpr, FunctionExpr, PrintExpr,
   LetStmt, AssignStmt, CompoundAssignStmt, FunctionStmt,

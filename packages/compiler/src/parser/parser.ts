@@ -4,8 +4,6 @@ import {
   Statement,
   Expression,
   LetStmt,
-  AssignStmt,
-  CompoundAssignStmt,
   FunctionStmt,
   ReturnStmt,
   IfStmt,
@@ -14,73 +12,64 @@ import {
   BreakStmt,
   ContinueStmt,
   BlockStmt,
-  ExpressionStmt,
   StructStmt,
   Parameter,
   AssignTarget,
-  IdentifierExpr,
-  IntegerLiteralExpr,
-  FloatLiteralExpr,
-  StringLiteralExpr,
-  BooleanLiteralExpr,
-  NullLiteralExpr,
-  BinaryExpr,
-  UnaryExpr,
-  CallExpr,
-  IndexExpr,
-  MemberExpr,
-  ArrayExpr,
-  ObjectExpr,
-  FunctionExpr,
-  PrintExpr,
   BinaryOperator,
 } from '../ast/index.js';
+import { CodeTimeError } from '../diagnostics/errors.js';
 
-export class ParserError extends Error {
+export class ParserError extends CodeTimeError {
   constructor(
     message: string,
     public readonly token: Token,
-    public readonly source?: string,
+    source?: string,
   ) {
-    super(message);
+    super(message, token.loc, source);
     this.name = 'ParserError';
-  }
-
-  /** Format the error with source context and caret pointing to error column */
-  format(src?: string): string {
-    const sourceText = src ?? this.source;
-    if (!sourceText) {
-      return `SyntaxError [line ${this.token.loc.line}, col ${this.token.loc.column}]: ${this.message}`;
-    }
-
-    const lines = sourceText.split('\n');
-    const lineNum = this.token.loc.line;
-    const colNum = this.token.loc.column;
-    const srcLine = lines[lineNum - 1] ?? '';
-    const caret = ' '.repeat(Math.max(0, colNum - 1)) + '^';
-
-    return [
-      `SyntaxError: ${this.message}`,
-      `  --> line ${lineNum}, column ${colNum}`,
-      '',
-      `  ${lineNum} | ${srcLine}`,
-      `    | ${caret}`,
-    ].join('\n');
+    this.displayName = 'SyntaxError';
   }
 }
+
+export interface ParseResult {
+  program: Program;
+  errors: ParserError[];
+}
+
+/** Maximum nesting of expressions/blocks before we report an error instead of overflowing the JS stack. */
+const MAX_NESTING_DEPTH = 200;
+
+/** Binding power of `and`; `not` takes everything that binds tighter than this as its operand. */
+const AND_PRECEDENCE = 2;
+/** Lowest binding power at which `not` is parsed as a low-precedence (Python-style) operator. */
+const NOT_PRECEDENCE = 3;
 
 export class Parser {
   private tokens: Token[];
   private current: number = 0;
   private source?: string;
+  private depth: number = 0;
 
   constructor(tokens: Token[], source?: string) {
     this.tokens = tokens;
     this.source = source;
   }
 
+  /** Parse the whole program, throwing the first syntax error encountered. */
   public parse(): Program {
+    const { program, errors } = this.parseProgram();
+    if (errors.length > 0) throw errors[0];
+    return program;
+  }
+
+  /**
+   * Parse the whole program with panic-mode error recovery: after a syntax
+   * error the parser skips to the next statement boundary and keeps going,
+   * so a single pass reports every independent syntax error.
+   */
+  public parseProgram(): ParseResult {
     const statements: Statement[] = [];
+    const errors: ParserError[] = [];
     const firstToken = this.peek();
     const startLoc: SourceLocation = firstToken ? firstToken.loc : { line: 1, column: 1, offset: 0 };
 
@@ -89,14 +78,66 @@ export class Parser {
       if (this.match(TokenType.NEWLINE, TokenType.SEMICOLON)) {
         continue;
       }
-      statements.push(this.statement());
+      const statementStart = this.current;
+      try {
+        statements.push(this.statement());
+      } catch (err) {
+        if (!(err instanceof ParserError)) throw err;
+        errors.push(err);
+        this.synchronize(statementStart);
+      }
     }
 
     return {
-      kind: 'Program',
-      body: statements,
-      loc: startLoc,
+      program: { kind: 'Program', body: statements, loc: startLoc },
+      errors,
     };
+  }
+
+  /**
+   * Skip tokens until the end of the statement that failed. Braces opened
+   * since `statementStart` are tracked so an error inside a block skips the
+   * rest of that block instead of producing cascading errors.
+   */
+  private synchronize(statementStart: number): void {
+    let braceDepth = 0;
+    for (let i = statementStart; i < this.current; i++) {
+      const type = this.tokens[i]!.type;
+      if (type === TokenType.LBRACE) braceDepth++;
+      else if (type === TokenType.RBRACE) braceDepth--;
+    }
+
+    while (!this.isAtEnd()) {
+      const token = this.peek();
+      if (braceDepth <= 0 && (token.type === TokenType.NEWLINE || token.type === TokenType.SEMICOLON)) {
+        this.advance();
+        return;
+      }
+      this.advance();
+      if (token.type === TokenType.LBRACE) {
+        braceDepth++;
+      } else if (token.type === TokenType.RBRACE) {
+        braceDepth--;
+        if (braceDepth <= 0) return;
+      }
+    }
+  }
+
+  /** Run `fn` one nesting level deeper, failing cleanly past MAX_NESTING_DEPTH. */
+  private nested<T>(fn: () => T): T {
+    this.depth++;
+    try {
+      if (this.depth > MAX_NESTING_DEPTH) {
+        throw new ParserError(
+          `Code is nested too deeply (more than ${MAX_NESTING_DEPTH} levels).`,
+          this.peek(),
+          this.source,
+        );
+      }
+      return fn();
+    } finally {
+      this.depth--;
+    }
   }
 
   // ── Statements ─────────────────────────────────────────────────────────────
@@ -317,6 +358,10 @@ export class Parser {
   }
 
   private blockStatement(): BlockStmt {
+    return this.nested(() => this.blockStatementInner());
+  }
+
+  private blockStatementInner(): BlockStmt {
     const braceToken = this.consume(TokenType.LBRACE, "Expect '{' to start block.");
     const body: Statement[] = [];
     this.skipNewlines();
@@ -393,12 +438,25 @@ export class Parser {
   }
 
   private expression(): Expression {
-    return this.binary(0);
+    return this.nested(() => this.binary(0));
   }
 
-  // Pratt Parser / Precedence climbing for binary expressions
+  /**
+   * Precedence climbing (the binary-operator core of a Pratt parser): each
+   * infix operator has a binding power from getPrecedence(), and the loop
+   * keeps absorbing operators that bind tighter than the caller's.
+   */
   private binary(parentPrecedence: number): Expression {
-    let left = this.unary();
+    let left: Expression;
+    if (parentPrecedence < NOT_PRECEDENCE && this.match(TokenType.NOT)) {
+      // Python-style `not`: binds looser than comparisons, so `not a == b`
+      // means `not (a == b)`, but tighter than `and` / `or`.
+      const opToken = this.previous();
+      const operand = this.nested(() => this.binary(AND_PRECEDENCE));
+      left = { kind: 'UnaryExpr', operator: 'not', operand, loc: opToken.loc };
+    } else {
+      left = this.unary();
+    }
 
     while (true) {
       const token = this.peek();
@@ -411,8 +469,7 @@ export class Parser {
 
       this.advance(); // consume the operator
       const operator = token.value as BinaryOperator;
-      const isRightAssoc = token.type === TokenType.POWER;
-      const right = this.binary(isRightAssoc ? precedence - 1 : precedence);
+      const right = this.binary(precedence);
 
       left = {
         kind: 'BinaryExpr',
@@ -429,7 +486,7 @@ export class Parser {
   private unary(): Expression {
     if (this.match(TokenType.MINUS, TokenType.NOT, TokenType.BANG)) {
       const opToken = this.previous();
-      const operand = this.unary();
+      const operand = this.nested(() => this.unary());
       return {
         kind: 'UnaryExpr',
         operator: opToken.value as '-' | 'not' | '!',
@@ -438,7 +495,20 @@ export class Parser {
       };
     }
 
-    return this.postfix();
+    return this.power();
+  }
+
+  /**
+   * `**` binds tighter than unary minus on its left (`-2 ** 2` is `-(2 ** 2)`)
+   * and is right-associative; its right operand may itself be unary (`2 ** -1`).
+   */
+  private power(): Expression {
+    const base = this.postfix();
+    if (this.match(TokenType.POWER)) {
+      const exponent = this.nested(() => this.unary());
+      return { kind: 'BinaryExpr', operator: '**', left: base, right: exponent, loc: base.loc };
+    }
+    return base;
   }
 
   private postfix(): Expression {
@@ -637,9 +707,20 @@ export class Parser {
       return expr;
     }
 
+    if (token.type === TokenType.ILLEGAL) {
+      const startsWithQuote = token.value.startsWith('"') || token.value.startsWith("'");
+      throw new ParserError(
+        startsWithQuote
+          ? 'Unterminated string literal: add the closing quote before the end of the line.'
+          : `Unexpected character '${token.value}'.`,
+        token,
+        this.source,
+      );
+    }
+
     throw new ParserError(
       `Expect expression, found ${tokenToString(token)}.`,
-      token || this.previous(),
+      token,
       this.source,
     );
   }
@@ -667,8 +748,7 @@ export class Parser {
       case TokenType.SLASH:
       case TokenType.PERCENT:
         return 6;
-      case TokenType.POWER:
-        return 7;
+      // `**` is handled by power(), below unary operators.
       default:
         return 0;
     }

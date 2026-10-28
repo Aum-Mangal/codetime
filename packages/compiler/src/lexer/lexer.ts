@@ -1,30 +1,13 @@
 import { Token, TokenType, SourceLocation, KEYWORDS, isKeyword } from './token.js';
+import { CodeTimeError } from '../diagnostics/errors.js';
 
 // ---------------------------------------------------------------------------
 // LexerError
 // ---------------------------------------------------------------------------
-export class LexerError extends Error {
-  constructor(
-    message: string,
-    public readonly loc: SourceLocation,
-    public readonly source?: string,
-  ) {
-    super(message);
+export class LexerError extends CodeTimeError {
+  constructor(message: string, loc: SourceLocation, source?: string) {
+    super(message, loc, source);
     this.name = 'LexerError';
-  }
-
-  /** Format the error with source context for display. */
-  format(src: string): string {
-    const lines  = src.split('\n');
-    const srcLine = lines[this.loc.line - 1] ?? '';
-    const caret  = ' '.repeat(this.loc.column - 1) + '^';
-    return [
-      `LexerError at line ${this.loc.line}, column ${this.loc.column}:`,
-      `  ${this.message}`,
-      '',
-      `  ${srcLine}`,
-      `  ${caret}`,
-    ].join('\n');
   }
 }
 
@@ -43,7 +26,9 @@ export class LexerError extends Error {
  *   - Comments (starting with `//` or `#`) are skipped; they do not produce
  *     tokens.
  *   - The lexer never throws — it emits ILLEGAL tokens for unrecognised
- *     characters so parsing can continue and collect more errors.
+ *     characters so parsing can continue and collect more errors. An
+ *     unterminated string is emitted as an ILLEGAL token whose value starts
+ *     with the opening quote, so the parser can report it precisely.
  *
  * Usage:
  *   const lexer  = new Lexer(source);
@@ -273,11 +258,12 @@ export class Lexer {
       const ch = this.current();
       if (ch === '\n') {
         // Unterminated string literal
-        this.addToken(TokenType.ILLEGAL, value, start);
+        this.addToken(TokenType.ILLEGAL, quote + value, start);
         return;
       }
       if (ch === '\\') {
         this.advance(); // consume backslash
+        if (this.isAtEnd()) break; // backslash at end of input: unterminated
         const esc = this.advance();
         switch (esc) {
           case 'n':  value += '\n'; break;
@@ -295,7 +281,7 @@ export class Lexer {
     }
 
     if (this.isAtEnd()) {
-      this.addToken(TokenType.ILLEGAL, value, start);
+      this.addToken(TokenType.ILLEGAL, quote + value, start);
       return;
     }
 
