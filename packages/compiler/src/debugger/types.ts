@@ -86,3 +86,12 @@ export interface RecordingStats {
   truncatedReason?: string;
   recordMs: number;
 }
+
+/** A downsampled view of a whole recording (see TimeTravelDebugger.getOverview). */
+export interface RunOverview {
+  totalSteps: number;
+  /** Per bucket: the most notable event kind, as an index into EVENT_KINDS. */
+  kinds: Uint8Array;
+  /** Per bucket: the deepest call depth (1 = top-level script). */
+  depths: Uint16Array;
+}

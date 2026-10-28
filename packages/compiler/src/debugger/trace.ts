@@ -17,6 +17,16 @@ export const EventKind = {
   Halt: 8,
 } as const;
 
+/**
+ * How notable each kind is when many steps share one pixel of a minimap:
+ * errors first, then calls and returns, output, writes, the end of the run,
+ * control flow.
+ */
+export const KIND_PRIORITY: readonly number[] = [
+  /* step */ 0, /* assign */ 4, /* call */ 7, /* return */ 6, /* print */ 5,
+  /* loop */ 1, /* branch */ 2, /* error */ 8, /* halt */ 3,
+];
+
 const NO_TARGET = -1;
 const INITIAL_CAPACITY = 1024;
 

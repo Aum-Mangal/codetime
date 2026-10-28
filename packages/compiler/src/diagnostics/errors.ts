@@ -24,10 +24,15 @@ export class CodeTimeError extends Error {
     this.name = 'CodeTimeError';
   }
 
+  /** The name users see, e.g. SyntaxError for a ParserError. */
+  get label(): string {
+    return this.displayName ?? this.name;
+  }
+
   /** Format the error with source context and a caret under the error column. */
   format(src?: string): string {
     const sourceText = src ?? this.source;
-    const name = this.displayName ?? this.name;
+    const name = this.label;
     const label = this.severity === 'warning' ? `${name} (warning)` : name;
     if (!sourceText) {
       return `${label} [line ${this.loc.line}, col ${this.loc.column}]: ${this.message}`;

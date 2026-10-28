@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TimeTravelDebugger } from '../src/debugger/debugger.js';
+import { EVENT_KINDS } from '../src/debugger/trace.js';
 import { VM } from '../src/vm/vm.js';
 import type { ExecutionSnapshot } from '../src/debugger/types.js';
 import * as fs from 'node:fs';
@@ -521,10 +522,59 @@ print(len(data))`);
     const dbg = TimeTravelDebugger.fromSource('let x = 1');
     expect(() => dbg.setBreakpoint(1, 'x ==')).toThrow(/breakpoint condition/);
   });
+
+  it('getBreakpointHits lists the steps where Continue would stop', () => {
+    const dbg = TimeTravelDebugger.fromSource(loopSrc);
+    expect(dbg.getBreakpointHits()).toEqual([]);
+    dbg.setBreakpoint(4, 'i % 2 == 1');
+    const hits = dbg.getBreakpointHits();
+    const stops: number[] = [];
+    for (let state = dbg.restart(); !(state = dbg.continueToBreakpoint()).isAtEnd;) stops.push(state.currentStep);
+    expect(hits).toEqual(stops);
+    expect(hits.length).toBe(3);
+    expect(dbg.getBreakpointHits(2)).toEqual(hits.slice(0, 2));
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+describe('TimeTravelDebugger — Run overview', () => {
+  const CALL_SRC = `fn f(a) {
+  return a + 1
+}
+let x = f(1)
+print(x)`;
+
+  it('summarizes every step when there are more buckets than steps', () => {
+    const dbg = TimeTravelDebugger.fromSource(CALL_SRC);
+    const overview = dbg.getOverview(10_000);
+    expect(overview.totalSteps).toBe(dbg.totalSteps);
+    expect(overview.kinds.length).toBe(dbg.totalSteps);
+    const events = dbg.getTimeline();
+    expect(Array.from(overview.kinds, k => EVENT_KINDS[k])).toEqual(events.map(e => e.type));
+    // Instructions on line 2 run inside f(); everything else at the top level.
+    events.forEach((e, i) => expect(overview.depths[i]).toBe(e.loc.line === 2 ? 2 : 1));
+  });
+
+  it('keeps the most notable kind and the deepest call in each bucket', () => {
+    const dbg = TimeTravelDebugger.fromSource(CALL_SRC);
+    const { kinds, depths } = dbg.getOverview(1);
+    expect(EVENT_KINDS[kinds[0]!]).toBe('call');
+    expect(depths[0]).toBe(2);
+    expect(dbg.getOverview(0).kinds.length).toBe(0);
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
 describe('TimeTravelDebugger — Watchpoints (when did this variable change?)', () => {
+  it("lineOf reads a step's line without replaying", () => {
+    const dbg = TimeTravelDebugger.fromSource('let x = 1\nlet y = 2\nx = 5');
+    const lastX = dbg.findChange('x', 'backward', dbg.totalSteps);
+    expect(dbg.lineOf(lastX)).toBe(3);
+    expect(dbg.lineOf(0)).toBe(1);
+    expect(dbg.lineOf(-1)).toBe(0);
+    expect(dbg.lineOf(dbg.totalSteps)).toBe(0);
+  });
+
   it('finds the previous and next write to a variable', () => {
     const dbg = TimeTravelDebugger.fromSource('let x = 1\nlet y = 2\nx = 5\ny = 3\nx = 9');
     const end = dbg.totalSteps - 1;

@@ -16,4 +16,6 @@ export {
   type DebuggerState,
   type Breakpoint,
   type RecordingStats,
+  type RunOverview,
 } from './types.js';
+export { EVENT_KINDS } from './trace.js';

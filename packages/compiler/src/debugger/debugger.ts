@@ -29,7 +29,7 @@ import { VM, type RuntimeError } from '../vm/vm.js';
 import { isTruthy } from '../vm/value.js';
 import { CodeTimeError } from '../diagnostics/errors.js';
 import { captureState, restoreState, StateCopier, type VMSnapshot } from './snapshot.js';
-import { EVENT_KINDS, EventKind, TraceLog } from './trace.js';
+import { EVENT_KINDS, EventKind, KIND_PRIORITY, TraceLog } from './trace.js';
 import { StepTracer } from './tracer.js';
 import { displayValue, frameViews, globalViews, visibleVariables } from './inspect.js';
 import type {
@@ -39,6 +39,7 @@ import type {
   ExecutionSnapshot,
   FrameSnapshot,
   RecordingStats,
+  RunOverview,
   VariableSnapshot,
 } from './types.js';
 
@@ -548,12 +549,58 @@ export class TimeTravelDebugger {
     return this.getCurrentSnapshot().loc;
   }
 
+  /** The source line of `step`, read from the event log (no replay). */
+  public lineOf(step: number): number {
+    return step >= 0 && step < this.totalSteps ? this.trace.line[step]! : 0;
+  }
+
   /** Every step that executed an instruction on `line`. */
   public getStepsForLine(line: number): number[] {
     const steps: number[] = [];
     const lines = this.trace.line;
     for (let i = 0; i < this.totalSteps; i++) if (lines[i] === line) steps.push(i);
     return steps;
+  }
+
+  /**
+   * A downsampled picture of the whole run for a timeline minimap: the run is
+   * split into `buckets` equal ranges of steps, and each bucket keeps its most
+   * notable event kind (an error over a call over an assignment over a plain
+   * step, and so on) and its deepest call depth.
+   */
+  public getOverview(buckets: number): RunOverview {
+    const total = this.totalSteps;
+    const count = Math.max(0, Math.min(Math.floor(buckets), total));
+    const kinds = new Uint8Array(count);
+    const depths = new Uint16Array(count);
+    const { kind, depth } = this.trace;
+    for (let b = 0; b < count; b++) {
+      const from = Math.floor((b * total) / count);
+      const to = Math.floor(((b + 1) * total) / count);
+      let best = kind[from]!;
+      let deepest = 0;
+      for (let i = from; i < to; i++) {
+        if (KIND_PRIORITY[kind[i]!]! > KIND_PRIORITY[best]!) best = kind[i]!;
+        if (depth[i]! > deepest) deepest = depth[i]!;
+      }
+      kinds[b] = best;
+      depths[b] = deepest;
+    }
+    return { totalSteps: total, kinds, depths };
+  }
+
+  /**
+   * Steps where a breakpoint stops the program (a line start on a breakpoint
+   * line whose condition holds), in order, at most `limit` of them.
+   */
+  public getBreakpointHits(limit = 1_000): number[] {
+    const hits: number[] = [];
+    if (this.breakpoints.size === 0) return hits;
+    const { lineStart } = this.trace;
+    for (let i = 0; i < this.totalSteps && hits.length < limit; i++) {
+      if (lineStart[i] === 1 && this.breakpointHit(i)) hits.push(i);
+    }
+    return hits;
   }
 
   /** How many times each line started executing, for a coverage/heat-map view. */
