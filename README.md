@@ -113,7 +113,10 @@ Stack slots are reused by sibling blocks, so a slot number does not identify a v
   - `codetime compile <file>` — Disassemble bytecode instructions.
   - `codetime eval "<code>"` — Evaluate code snippets interactively.
 - **Automated Verification**:
-  - 285 unit, integration and regression tests (Vitest), run in CI on Linux and Windows with Node 20 and 22, including a differential test that compares replayed state with an uncheckpointed run at every step.
+  - 320 Vitest tests, run in CI on Linux and Windows with Node 20 and 22. Line coverage of the compiler package is 95.8%, and CI fails below 94%.
+  - **Property-based differential fuzzing** ([fast-check](https://fast-check.dev/)). Random well-formed programs, with closures, default parameters, nested loops, block locals, array mutation and occasional runtime errors, must give the same output and the same error on the VM and through the replay debugger. Replayed state must match at random steps, and arbitrary or truncated source must never crash the toolchain with a raw JavaScript exception. Shrinking reduces a failure to a minimal program.
+  - **Golden-output tests**: every `examples/*.ct` has a checked-in `.expected` file, compared against the VM, the replay debugger, and the built `codetime` CLI.
+  - **End-to-end tests** ([Playwright](https://playwright.dev/), Chrome) against the production build, covering the reverse-stepping demo, the "last change" watchpoint, breakpoints set before Debug, a run that hits the step limit, and compile-error reporting.
 
 ---
 
@@ -135,8 +138,14 @@ cd codetime
 npm install
 npm run build
 
-# Run full test suite (285 tests across 8 test files)
+# Run the test suite (unit, regression, golden, property-based)
 npm test
+
+# Coverage report with thresholds, golden output through the CLI,
+# and browser end-to-end tests (needs Google Chrome installed)
+npm run test:coverage
+npm run test:golden
+npm run test:e2e
 
 # Run performance benchmarks
 npm run bench
@@ -211,11 +220,11 @@ codetime/
 │   │   │   ├── codegen/     Bytecode compiler & disassembler
 │   │   │   ├── vm/          Stack Virtual Machine runtime
 │   │   │   └── debugger/    Record-and-replay debugger: trace, checkpoints, navigation
-│   │   ├── tests/           Vitest unit, integration & regression suites (285 tests)
+│   │   ├── tests/           Vitest unit, regression, golden & property-based suites (320 tests)
 │   │   └── benchmarks/      Throughput benchmark suite
 │   ├── cli/              Node.js CLI executable tool (codetime)
-│   └── ide/              React + Vite + Monaco + Web Worker Visual Time-Travel IDE
-├── examples/             Curated sample programs (.ct)
+│   └── ide/              React + Vite + Monaco + Web Worker Visual Time-Travel IDE (e2e/: Playwright)
+├── examples/             Sample programs (.ct) with their expected output (.expected)
 ├── docs/                 Language specifications, architecture diagrams, and debugger docs
 ├── assets/               Visual previews and diagrams
 └── .github/workflows/    CI test workflow and automated GitHub Pages deployment

@@ -11,6 +11,9 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:coverage": "npm run test:coverage --workspace=@codetime/compiler",
+    "test:golden": "node scripts/check-golden.mjs",
+    "test:e2e": "npm run test:e2e --workspace=@codetime/ide",
     "bench": "npm run bench --workspace=@codetime/compiler",
     "lint": "eslint . --max-warnings 0",
     "clean": "npm run clean --workspaces --if-present",
