@@ -8,157 +8,12 @@ import { MemoryPanel } from './components/MemoryPanel';
 import { TimelinePanel } from './components/TimelinePanel';
 import { ConsolePanel } from './components/ConsolePanel';
 import { ErrorPanel } from './components/ErrorPanel';
+import { EXAMPLES, DEFAULT_EXAMPLE } from './examples';
 
-const EXAMPLES = [
-  {
-    name: 'hello',
-    label: 'Hello World',
-    code: `// Hello World in CodeTime
-
-print("Hello, World!")
-print("Welcome to CodeTime — a language with time-travel debugging.")
-`,
-  },
-  {
-    name: 'fibonacci',
-    label: 'Fibonacci Sequence',
-    code: `// Fibonacci sequence in CodeTime
-// Demonstrates: recursion, conditionals, while loops
-
-fn fibonacci(n) {
-    if n <= 1 {
-        return n
-    }
-    return fibonacci(n - 1) + fibonacci(n - 2)
-}
-
-let i = 0
-while i <= 8 {
-    print("fib(" + str(i) + ") = " + str(fibonacci(i)))
-    i += 1
-}
-`,
-  },
-  {
-    name: 'factorial',
-    label: 'Recursive Factorial',
-    code: `// Factorial in CodeTime
-fn factorial(n) {
-    if n <= 1 {
-        return 1
-    }
-    return n * factorial(n - 1)
-}
-
-let i = 0
-while i <= 6 {
-    print(str(i) + "! = " + str(factorial(i)))
-    i += 1
-}
-`,
-  },
-  {
-    name: 'arrays',
-    label: 'Arrays & Mutation',
-    code: `// Arrays in CodeTime
-let numbers = [3, 1, 4, 1, 5, 9, 2, 6]
-
-print("Original array:", numbers)
-print("Length:", numbers.length)
-
-let sum = 0
-for n in numbers {
-    sum += n
-}
-print("Sum:", sum)
-
-numbers.push(10)
-print("After push(10):", numbers)
-`,
-  },
-  {
-    name: 'closures',
-    label: 'Closures & High-Order Functions',
-    code: `// Closures in CodeTime
-fn makeCounter(start) {
-    let count = start
-    fn increment() {
-        count += 1
-        return count
-    }
-    return increment
-}
-
-let c1 = makeCounter(0)
-let c2 = makeCounter(100)
-
-print("c1:", c1(), c1(), c1())
-print("c2:", c2())
-`,
-  },
-  {
-    name: 'sorting',
-    label: 'Bubble Sort Algorithm',
-    code: `// Bubble Sort in CodeTime
-fn bubbleSort(arr) {
-    let n = arr.length
-    let i = 0
-    while i < n {
-        let j = 0
-        while j < n - i - 1 {
-            if arr[j] > arr[j + 1] {
-                let temp = arr[j]
-                arr[j] = arr[j + 1]
-                arr[j + 1] = temp
-            }
-            j += 1
-        }
-        i += 1
-    }
-    return arr
-}
-
-let data = [64, 34, 25, 12, 22, 11]
-print("Sorted:", bubbleSort(data))
-`,
-  },
-  {
-    name: 'buggy',
-    label: 'Buggy Binary Search (Time-Travel Demo)',
-    code: `// Buggy Binary Search — Time-Travel Debugger Demo
-//
-// This program has a subtle bug: 'hi' starts at arr.length instead of arr.length - 1!
-// Step backward through history to find where mid goes out of bounds.
-
-fn binarySearch(arr, target) {
-    let lo = 0
-    let hi = arr.length // BUG: should be arr.length - 1
-
-    while lo <= hi {
-        let mid = int((lo + hi) / 2)
-        let value = arr[mid]
-
-        if value == target { return mid }
-
-        if value < target {
-            lo = mid + 1
-        } else {
-            hi = mid - 1
-        }
-    }
-    return -1
-}
-
-let sorted = [1, 3, 5, 7, 9, 11]
-print("Searching for 5: index", binarySearch(sorted, 5))
-print("Searching for 7: index", binarySearch(sorted, 7))
-`,
-  },
-];
 
 export function App() {
-  const [selectedExample, setSelectedExample] = useState('fibonacci');
-  const [code, setCode] = useState(EXAMPLES[1]!.code);
+  const [selectedExample, setSelectedExample] = useState(DEFAULT_EXAMPLE);
+  const [code, setCode] = useState(() => EXAMPLES.find((e) => e.name === DEFAULT_EXAMPLE)?.code ?? '');
   const [debuggerState, setDebuggerState] = useState<DebuggerState | null>(null);
   const [timeline, setTimeline] = useState<DebuggerEvent[]>([]);
   const [error, setError] = useState<{ message: string; line: number; column: number; formatted: string } | null>(null);
@@ -199,6 +54,7 @@ export function App() {
       setDebuggerState(null);
       setIsDebugging(false);
       setBreakpoints([]);
+      workerRef.current?.postMessage({ type: 'CLEAR_BREAKPOINTS' });
     }
   };
 
@@ -242,14 +98,11 @@ export function App() {
     workerRef.current?.postMessage({ type: 'GOTO_END' });
   }, []);
 
-  const handleToggleBreakpoint = (line: number) => {
-    setBreakpoints((prev) => {
-      const exists = prev.includes(line);
-      const next = exists ? prev.filter((l) => l !== line) : [...prev, line];
-      workerRef.current?.postMessage({ type: 'TOGGLE_BREAKPOINT', payload: { line } });
-      return next;
-    });
-  };
+  const handleToggleBreakpoint = useCallback((line: number) => {
+    // Side effect stays outside the state updater: React may run updaters twice (StrictMode).
+    workerRef.current?.postMessage({ type: 'TOGGLE_BREAKPOINT', payload: { line } });
+    setBreakpoints((prev) => (prev.includes(line) ? prev.filter((l) => l !== line) : [...prev, line]));
+  }, []);
 
   // Keyboard Shortcuts Handler
   useEffect(() => {

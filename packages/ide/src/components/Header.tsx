@@ -58,7 +58,7 @@ export const Header: React.FC<HeaderProps> = ({
               Time-Travel IDE
             </span>
           </h1>
-          <p className="text-[11px] text-slate-400 font-mono">v1.0.0 • VM Bytecode Engine</p>
+          <p className="text-[11px] text-slate-400 font-mono">v1.1.0 • VM Bytecode Engine</p>
         </div>
       </div>
 
@@ -99,7 +99,7 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={onStepBackward}
               disabled={state.isAtStart}
               className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
-              title="Step Backward (ArrowLeft)"
+              title="Step Backward (Alt+Left)"
             >
               <ChevronLeft className="w-4 h-4" />
             </button>
@@ -110,7 +110,7 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={onStepForward}
               disabled={state.isAtEnd}
               className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 rounded transition"
-              title="Step Instruction Forward (ArrowRight)"
+              title="Step Instruction Forward (Alt+Right)"
             >
               <ChevronRight className="w-4 h-4" />
             </button>

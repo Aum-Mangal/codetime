@@ -1,5 +1,5 @@
 import React from 'react';
-import { AlertTriangle, XCircle } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 
 export interface ErrorPanelProps {
   error: {

@@ -2,6 +2,18 @@ import { TimeTravelDebugger } from '@codetime/compiler';
 
 let debuggerInstance: TimeTravelDebugger | null = null;
 
+/**
+ * Breakpoints belong to the editing session, not to one recording: they can be
+ * set before the first Debug and must survive every re-record.
+ */
+const breakpoints = new Set<number>();
+
+function record(source: string): TimeTravelDebugger {
+  const dbg = TimeTravelDebugger.fromSource(source);
+  for (const line of breakpoints) dbg.setBreakpoint(line);
+  return dbg;
+}
+
 function sendState(): void {
   if (!debuggerInstance) return;
   self.postMessage({
@@ -23,7 +35,7 @@ self.onmessage = (e: MessageEvent) => {
        * Responds with the initial debugger state (step 0).
        */
       case 'RECORD': {
-        debuggerInstance = TimeTravelDebugger.fromSource(payload.source as string);
+        debuggerInstance = record(payload.source as string);
         debuggerInstance.restart();
         sendState();
         break;
@@ -34,7 +46,7 @@ self.onmessage = (e: MessageEvent) => {
        * Used for "Run" mode — no need to scrub through intermediate steps.
        */
       case 'RECORD_AND_END': {
-        debuggerInstance = TimeTravelDebugger.fromSource(payload.source as string);
+        debuggerInstance = record(payload.source as string);
         debuggerInstance.gotoEnd();
         sendState();
         break;
@@ -76,21 +88,28 @@ self.onmessage = (e: MessageEvent) => {
         break;
 
       case 'SET_BREAKPOINT':
+        breakpoints.add(payload.line as number);
         debuggerInstance?.setBreakpoint(payload.line as number);
         sendState();
         break;
 
       case 'REMOVE_BREAKPOINT':
+        breakpoints.delete(payload.line as number);
         debuggerInstance?.removeBreakpoint(payload.line as number);
         sendState();
         break;
 
-      case 'TOGGLE_BREAKPOINT':
-        debuggerInstance?.toggleBreakpoint(payload.line as number);
+      case 'TOGGLE_BREAKPOINT': {
+        const line = payload.line as number;
+        if (breakpoints.has(line)) breakpoints.delete(line);
+        else breakpoints.add(line);
+        debuggerInstance?.toggleBreakpoint(line);
         sendState();
         break;
+      }
 
       case 'CLEAR_BREAKPOINTS':
+        breakpoints.clear();
         debuggerInstance?.clearBreakpoints();
         sendState();
         break;
@@ -101,7 +120,7 @@ self.onmessage = (e: MessageEvent) => {
   } catch (err: any) {
     // Distinguish between compile-time errors and runtime errors
     const message: string = err.message ?? String(err);
-    const loc = err.loc ?? err.token?.loc ?? { line: 1, column: 1 };
+    const loc = err.loc ?? { line: 1, column: 1 };
 
     self.postMessage({
       type: 'ERROR',
