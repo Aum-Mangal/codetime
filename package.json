@@ -15,6 +15,7 @@
     "test:golden": "node scripts/check-golden.mjs",
     "test:e2e": "npm run test:e2e --workspace=@codetime/ide",
     "bench": "npm run bench --workspace=@codetime/compiler",
+    "bench:replay": "npm run bench:replay --workspace=@codetime/compiler",
     "lint": "eslint . --max-warnings 0",
     "clean": "npm run clean --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present"

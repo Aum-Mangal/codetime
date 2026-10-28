@@ -1,6 +1,7 @@
 /**
  * Measures the checkpoint + replay debugger on programs that grow an array:
- * recording time, heap retained by the recording, and seek latency.
+ * recording time, heap retained by the recording, and seek latency, then a
+ * comparison with the previous design (a full state copy for every step).
  *
  * Run with: npm run bench:replay   (needs --expose-gc for heap numbers)
  */
@@ -79,5 +80,30 @@ console.log('\nCheckpoint + replay debugger: `items.push` loop\n');
 console.log('| pushes |      steps |    record |  retained | ckpts | interval |  seek p50 / p99   | step-back p50/p99 |');
 console.log('|-------:|-----------:|----------:|----------:|------:|---------:|------------------:|------------------:|');
 for (const n of [500, 2_000, 5_000, 20_000]) measure(n);
+
+/** Record `src` with `options`; returns the time taken and the heap the recording keeps alive. */
+function recordWith(src: string, options: Parameters<TimeTravelDebugger['record']>[0]): { ms: number; mb: number; dbg: TimeTravelDebugger } {
+  const before = heapUsed();
+  const start = performance.now();
+  const dbg = new TimeTravelDebugger(src);
+  dbg.record(options);
+  const ms = performance.now() - start;
+  return { ms, mb: (heapUsed() - before) / 1024 / 1024, dbg };
+}
+
+// The design this replaced kept a full copy of the VM state for every step.
+// Simulated here with the same engine and a checkpoint after every step.
+console.log('\nPrevious design (full state copy per step) vs checkpoint + replay, same programs\n');
+console.log('| pushes |    steps | per-step copies: record | retained | checkpoint + replay: record | retained |');
+console.log('|-------:|---------:|------------------------:|---------:|----------------------------:|---------:|');
+for (const n of [500, 2_000]) {
+  const src = program(n);
+  const perStep = recordWith(src, { checkpointInterval: 1, maxCheckpoints: Number.MAX_SAFE_INTEGER });
+  const steps = perStep.dbg.totalSteps;
+  perStep.dbg = undefined as unknown as TimeTravelDebugger; // release before the next measurement
+  const replay = recordWith(src, {});
+  const mb = (x: number) => (gc ? `${x.toFixed(1)} MB` : '(n/a)');
+  console.log(`| ${String(n).padStart(6)} | ${steps.toLocaleString('en-US').padStart(8)} | ${`${perStep.ms.toFixed(0)} ms`.padStart(23)} | ${mb(perStep.mb).padStart(8)} | ${`${replay.ms.toFixed(0)} ms`.padStart(27)} | ${mb(replay.mb).padStart(8)} |`);
+}
 if (!gc) console.log('\nHeap numbers need: node --expose-gc (npm run bench:replay sets it).');
 console.log('');
