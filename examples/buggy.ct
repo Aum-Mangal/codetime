@@ -1,23 +1,26 @@
 // Buggy Program — designed to demonstrate time-travel debugging
 //
-// This program contains a subtle off-by-one bug in a binary search
-// implementation. The bug causes incorrect results for certain inputs.
+// This binary search has an off-by-one bug in its loop condition. It does
+// not crash; it silently returns -1 for some values that ARE in the array.
 //
-// To find the bug using the time-travel debugger:
-// 1. Run the program in debug mode
-// 2. Notice that search([1,3,5,7,9], 7) returns -1 instead of 3
-// 3. Step backward through the execution when `target` is 7
-// 4. Watch `mid`, `lo`, and `hi` evolve
-// 5. Find the step where the condition check goes wrong
+// Output:
+//   Searching for 7:  index 3      (correct)
+//   Searching for 11: index 5      (correct)
+//   Searching for 1:  index -1     (WRONG, should be 0)
+//   Searching for 15: index -1     (WRONG, should be 7)
+//
+// To find the bug with the time-travel debugger:
+// 1. Click Debug, then jump to the end of the run.
+// 2. Step backward to the last `return -1`.
+// 3. Look at `lo` and `hi`: they are equal, and arr[lo] is the target.
+// 4. The loop exited without checking that last candidate, because the
+//    condition is `lo < hi`. The fix is `lo <= hi`.
 
 fn binarySearch(arr, target) {
     let lo = 0
-    let hi = arr.length    // BUG: should be arr.length - 1
-                           // This causes hi to start out-of-bounds,
-                           // which triggers an incorrect mid calculation
-                           // and can skip the target entirely.
+    let hi = arr.length - 1
 
-    while lo <= hi {
+    while lo < hi {          // BUG: should be lo <= hi
         let mid = int((lo + hi) / 2)
         let value = arr[mid]
 
@@ -37,12 +40,7 @@ fn binarySearch(arr, target) {
 
 let sorted = [1, 3, 5, 7, 9, 11, 13, 15]
 
-// These should all succeed:
-print("Searching for 1:  index " + str(binarySearch(sorted, 1)))   // should be 0
-print("Searching for 5:  index " + str(binarySearch(sorted, 5)))   // should be 2
-print("Searching for 15: index " + str(binarySearch(sorted, 15)))  // should be 7
-
-// This one will return -1 incorrectly due to the bug:
-print("Searching for 7:  index " + str(binarySearch(sorted, 7)))   // BUG: returns -1, should be 3
-
-// The correct version would use: hi = arr.length - 1
+print("Searching for 7:  index " + str(binarySearch(sorted, 7)))
+print("Searching for 11: index " + str(binarySearch(sorted, 11)))
+print("Searching for 1:  index " + str(binarySearch(sorted, 1)))
+print("Searching for 15: index " + str(binarySearch(sorted, 15)))
