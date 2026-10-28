@@ -28,6 +28,8 @@ export interface Local {
   name: string;
   depth: number;
   isCaptured: boolean;
+  /** Index of this local's entry in chunk.debug.locals (-1 for the reserved slot 0). */
+  debugIndex: number;
 }
 
 export interface UpvalueDesc {
@@ -73,6 +75,7 @@ export class BytecodeCompiler {
       name: functionType === 'script' ? '' : functionName,
       depth: 0,
       isCaptured: false,
+      debugIndex: -1,
     });
   }
 
@@ -80,8 +83,19 @@ export class BytecodeCompiler {
     for (const stmt of program.body) {
       this.compileStatement(stmt);
     }
-    this.emitReturn(program.loc);
+    // Attribute the implicit end-of-script return to the last statement, so a
+    // debugger stepping off the end does not jump back to line 1.
+    this.emitReturn(program.body[program.body.length - 1]?.loc ?? program.loc);
+    this.closeDebugRanges();
     return this.chunk;
+  }
+
+  /** Locals still in scope when the function ends stay live until its last instruction. */
+  private closeDebugRanges(): void {
+    const lastIp = this.chunk.code.length - 1;
+    for (const info of this.chunk.debug.locals) {
+      if (info.endIp === Number.MAX_SAFE_INTEGER) info.endIp = lastIp;
+    }
   }
 
   // ── Emitting Helpers ────────────────────────────────────────────────────────
@@ -140,6 +154,10 @@ export class BytecodeCompiler {
     this.scopeDepth--;
     while (this.locals.length > 0 && this.locals[this.locals.length - 1]!.depth > this.scopeDepth) {
       const local = this.locals.pop()!;
+      if (local.debugIndex >= 0) {
+        // The local is still on the stack until this discard instruction runs.
+        this.chunk.debug.locals[local.debugIndex]!.endIp = this.chunk.code.length;
+      }
       this.emitDiscardLocal(local, loc);
     }
   }
@@ -161,13 +179,23 @@ export class BytecodeCompiler {
     }
   }
 
+  /** Declare a local whose value is already on top of the stack. Returns its slot. */
   private addLocal(name: string): number {
+    const slot = this.locals.length;
+    this.chunk.debug.locals.push({
+      name,
+      slot,
+      depth: this.scopeDepth,
+      startIp: this.chunk.code.length,
+      endIp: Number.MAX_SAFE_INTEGER,
+    });
     this.locals.push({
       name,
       depth: this.scopeDepth,
       isCaptured: false,
+      debugIndex: this.chunk.debug.locals.length - 1,
     });
-    return this.locals.length - 1;
+    return slot;
   }
 
   private resolveLocal(name: string): number {
@@ -179,7 +207,7 @@ export class BytecodeCompiler {
     return -1;
   }
 
-  private addUpvalue(index: number, isLocal: boolean): number {
+  private addUpvalue(index: number, isLocal: boolean, name: string): number {
     for (let i = 0; i < this.upvalues.length; i++) {
       const upvalue = this.upvalues[i]!;
       if (upvalue.index === index && upvalue.isLocal === isLocal) {
@@ -187,6 +215,7 @@ export class BytecodeCompiler {
       }
     }
     this.upvalues.push({ index, isLocal });
+    this.chunk.debug.upvalueNames.push(name);
     return this.upvalues.length - 1;
   }
 
@@ -196,12 +225,12 @@ export class BytecodeCompiler {
     const local = this.enclosing.resolveLocal(name);
     if (local !== -1) {
       this.enclosing.locals[local]!.isCaptured = true;
-      return this.addUpvalue(local, true);
+      return this.addUpvalue(local, true, name);
     }
 
     const upvalue = this.enclosing.resolveUpvalue(name);
     if (upvalue !== -1) {
-      return this.addUpvalue(upvalue, false);
+      return this.addUpvalue(upvalue, false, name);
     }
 
     return -1;
@@ -438,6 +467,7 @@ export class BytecodeCompiler {
     }
 
     fnCompiler.emitReturn(loc);
+    fnCompiler.closeDebugRanges();
 
     const fnValue: FunctionValue = {
       kind: 'function',
@@ -446,7 +476,6 @@ export class BytecodeCompiler {
       minArity: fnCompiler.minArity,
       chunk: fnCompiler.chunk,
       upvalues: fnCompiler.upvalues,
-      localNames: fnCompiler.locals.map(l => l.name),
     };
 
     const constIdx = this.chunk.addConstant(fnValue);

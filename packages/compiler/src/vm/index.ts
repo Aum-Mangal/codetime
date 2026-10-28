@@ -2,7 +2,9 @@ export {
   VM,
   RuntimeError,
   DEFAULT_MAX_INSTRUCTIONS,
+  MISSING_ARG,
   type CallFrame,
+  type VMStatus,
   type VMResult,
   type VMOptions,
 } from './vm.js';
@@ -15,6 +17,8 @@ export {
   type FunctionValue,
   type ClosureValue,
   type NativeFunctionValue,
+  type NativeCallContext,
+  type NativeFn,
   type StructTypeValue,
   type Upvalue,
   isTruthy,

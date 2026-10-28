@@ -291,3 +291,43 @@ describe('Regression — constant pool', () => {
     expect(ones).toHaveLength(1);
   });
 });
+
+describe('Regression — closures over null', () => {
+  it('a captured variable holding null stays null after its frame returns', () => {
+    expectBoth(`
+fn make() {
+  let x = null
+  return fn() { return x }
+}
+print(make()())
+`, ['null']);
+  });
+
+  it('assigning null through a closed-over variable sticks', () => {
+    expectBoth(`
+fn make() {
+  let x = 1
+  fn set() { x = null }
+  fn get() { return x }
+  return [set, get]
+}
+let pair = make()
+pair[0]()
+print(pair[1]())
+`, ['null']);
+  });
+});
+
+describe('Regression — resumable VM', () => {
+  it('step() runs one instruction at a time to the same result as run()', () => {
+    const src = 'let total = 0\nfor x in [1, 2, 3] { total += x }\nprint(total)';
+    const compiled = compile(src);
+    const vm = new VM(src);
+    vm.load(compiled.chunk!);
+    let steps = 0;
+    while (vm.step() === 'running') steps++;
+    expect(vm.status).toBe('halted');
+    expect(vm.output).toEqual(['6']);
+    expect(steps + 1).toBe(vm.instructionCount);
+  });
+});

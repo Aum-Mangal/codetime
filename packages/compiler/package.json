@@ -16,6 +16,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "bench": "tsx benchmarks/benchmark.ts",
+    "bench:replay": "node --expose-gc --import tsx benchmarks/replay.ts",
     "clean": "rimraf dist",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json"
   },

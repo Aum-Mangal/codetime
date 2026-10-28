@@ -1,172 +1,311 @@
+/**
+ * Record-and-replay time-travel debugger.
+ *
+ * Recording runs the program once on the real VM and keeps two things:
+ *   1. a compact event log with one entry per executed instruction
+ *      (trace.ts: line, call depth, event kind, variable written, ...), and
+ *   2. a full copy of the VM state every `checkpointInterval` steps.
+ *
+ * To show step n, the debugger restores the nearest checkpoint before n into
+ * a scratch VM and re-executes the remaining steps. The VM is deterministic
+ * (no clock, randomness or input), so the replayed state is exactly the state
+ * the program had. Seeking costs at most one interval of re-execution, and
+ * stepping forward from the current position costs one instruction.
+ *
+ * Memory is O(T * 20 bytes + C * S) for T steps, C checkpoints and state size
+ * S, instead of O(T * S) for a snapshot per step. C is capped: when there are
+ * too many checkpoints, every other one is dropped and the interval doubles.
+ *
+ * Line stepping, reverse stepping, breakpoints and watchpoints are answered
+ * from the event log alone; only the step finally displayed is replayed.
+ */
 import { compile } from '../pipeline.js';
-import { OpCode } from '../codegen/chunk.js';
-import {
-  Value,
-  ClosureValue,
-  FunctionValue,
-  Upvalue,
-  ArrayValue,
-  ObjectValue,
-  isTruthy,
-  valuesEqual,
-  valueToString,
-  valueType,
-  instantiateStruct,
-} from '../vm/value.js';
-import { createNatives, getBuiltinProperty, BUILTIN_NAMES } from '../vm/natives.js';
-import { CallFrame } from '../vm/vm.js';
-import { SourceLocation } from '../lexer/token.js';
-import {
-  ExecutionSnapshot,
-  FrameSnapshot,
-  VariableSnapshot,
+import type { Chunk } from '../codegen/chunk.js';
+import { BytecodeCompiler } from '../codegen/compiler.js';
+import { Lexer } from '../lexer/lexer.js';
+import { Parser } from '../parser/parser.js';
+import type { SourceLocation } from '../lexer/token.js';
+import { VM, type RuntimeError } from '../vm/vm.js';
+import { isTruthy } from '../vm/value.js';
+import { CodeTimeError } from '../diagnostics/errors.js';
+import { captureState, restoreState, StateCopier, type VMSnapshot } from './snapshot.js';
+import { EVENT_KINDS, EventKind, TraceLog } from './trace.js';
+import { StepTracer } from './tracer.js';
+import { displayValue, frameViews, globalViews, visibleVariables } from './inspect.js';
+import type {
+  Breakpoint,
   DebuggerEvent,
   DebuggerState,
-  Breakpoint,
+  ExecutionSnapshot,
+  FrameSnapshot,
+  RecordingStats,
+  VariableSnapshot,
 } from './types.js';
 
-const STACK_MAX = 4096;
-const FRAMES_MAX = 256;
-const DEFAULT_MAX_STEPS = 100_000;
+export const DEFAULT_MAX_STEPS = 1_000_000;
+export const DEFAULT_CHECKPOINT_INTERVAL = 1_000;
+export const DEFAULT_MAX_CHECKPOINTS = 200;
+
+/** Breakpoint conditions get a small budget so `while true {}` cannot hang the debugger. */
+const CONDITION_MAX_INSTRUCTIONS = 100_000;
+const CONDITION_RESULT = '__condition__';
+
+export interface RecordingOptions {
+  /** Stop recording after this many steps; the recording is then marked truncated. */
+  maxSteps?: number;
+  /** Steps between checkpoints. Smaller seeks faster but uses more memory. */
+  checkpointInterval?: number;
+  /** Upper bound on stored checkpoints; beyond it they are thinned out. */
+  maxCheckpoints?: number;
+}
+
+export type NavigationCommand =
+  | 'stepForward'
+  | 'stepBackward'
+  | 'stepInto'
+  | 'stepOver'
+  | 'stepOut'
+  | 'reverseStepInto'
+  | 'reverseStepOver'
+  | 'reverseStepOut'
+  | 'continue'
+  | 'reverseContinue'
+  | 'restart'
+  | 'gotoEnd';
+
+interface Checkpoint {
+  /** The state is the one after this step ran; -1 is the state before the first step. */
+  step: number;
+  state: VMSnapshot;
+}
+
+interface Recording {
+  chunk: Chunk;
+  trace: TraceLog;
+  checkpoints: Checkpoint[];
+  checkpointInterval: number;
+  /** Every line the program printed; step n shows the first trace.outputLength[n]. */
+  output: string[];
+  error: RuntimeError | null;
+  truncatedReason: string | null;
+  recordMs: number;
+}
+
+interface BreakpointEntry extends Breakpoint {
+  conditionChunk?: Chunk;
+}
+
+/** A VM positioned somewhere in a recording, moved by restoring checkpoints and replaying. */
+class Replayer {
+  public readonly vm: VM;
+  private readonly tracer = new StepTracer();
+  /** The step whose resulting state the VM holds. */
+  private position = Number.NEGATIVE_INFINITY;
+  /** The step described by tracer.step, or -1. */
+  private describedStep = -1;
+
+  constructor(source: string, private readonly recording: Recording) {
+    this.vm = new VM(source, { maxInstructions: 0 });
+  }
+
+  /** Put the VM in the state after `step`; with `describe`, also describe that step. */
+  public seek(step: number, describe: boolean): void {
+    if (step === this.position && (!describe || this.describedStep === step)) return;
+
+    const runForward = this.position < step && step - this.position <= this.recording.checkpointInterval;
+    if (!runForward) {
+      // Always restore strictly before `step`, so the step itself is replayed
+      // and can be described.
+      const checkpoint = this.checkpointBefore(step);
+      restoreState(this.vm, checkpoint.state);
+      this.position = checkpoint.step;
+    }
+    while (this.position < step) {
+      this.tracer.trace(this.vm, describe && this.position + 1 === step);
+      this.position++;
+    }
+    this.describedStep = describe ? step : -1;
+  }
+
+  /** The event for the step the VM was last moved to with `describe`. */
+  public event(): DebuggerEvent {
+    const s = this.tracer.step;
+    const event: DebuggerEvent = {
+      type: EVENT_KINDS[s.kind]!,
+      description: s.description,
+      loc: s.loc,
+      stepIndex: this.describedStep,
+    };
+    if (s.varName !== undefined) event.varName = s.varName;
+    if (s.varValue !== undefined) event.varValue = s.varValue;
+    if (s.fnName !== undefined) event.fnName = s.fnName;
+    return event;
+  }
+
+  public instructionPointer(): number {
+    return this.tracer.step.ip;
+  }
+
+  /** Describe steps `from..to` (inclusive) by replaying them once. */
+  public describeRange(from: number, to: number): DebuggerEvent[] {
+    this.seek(from, true);
+    const events = [this.event()];
+    while (this.position < to) {
+      this.tracer.trace(this.vm, true);
+      this.position++;
+      this.describedStep = this.position;
+      events.push(this.event());
+    }
+    return events;
+  }
+
+  private checkpointBefore(step: number): Checkpoint {
+    const checkpoints = this.recording.checkpoints;
+    let lo = 0;
+    let hi = checkpoints.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (checkpoints[mid]!.step < step) lo = mid;
+      else hi = mid - 1;
+    }
+    return checkpoints[lo]!;
+  }
+}
 
 export class TimeTravelDebugger {
-  // ── Public State ──────────────────────────────────────────────────────────
-  public history: ExecutionSnapshot[] = [];
-  public currentStep: number = 0;
-  public source: string = '';
-  public totalSteps: number = 0;
-  public hasRecordingError: boolean = false;
-  public recordingErrorMessage: string = '';
+  public currentStep = 0;
+  public readonly source: string;
 
-  // ── Breakpoints ───────────────────────────────────────────────────────────
-  private breakpoints: Map<number, Breakpoint> = new Map();
-
-  // ── VM State (only used during recording, discarded after) ─────────────────
-  private stack: Value[] = [];
-  private frames: CallFrame[] = [];
-  private globals: Map<string, Value> = new Map();
-  private openUpvalues: Upvalue[] = [];
-  private output: string[] = [];
+  private recording: Recording | null = null;
+  private cursor: Replayer | null = null;
+  /** Second replayer for queries (timeline windows, conditions) so the cursor stays put. */
+  private scratch: Replayer | null = null;
+  private readonly breakpoints = new Map<number, BreakpointEntry>();
 
   constructor(source: string) {
     this.source = source;
   }
 
-  public static fromSource(source: string, maxSteps = DEFAULT_MAX_STEPS): TimeTravelDebugger {
+  public static fromSource(source: string, options: RecordingOptions | number = {}): TimeTravelDebugger {
     const dbg = new TimeTravelDebugger(source);
-    dbg.record(maxSteps);
+    dbg.record(options);
     return dbg;
   }
 
-  // ── Recording API ──────────────────────────────────────────────────────────
+  // ── Recording ───────────────────────────────────────────────────────────────
 
-  public record(maxSteps = DEFAULT_MAX_STEPS): void {
-    // Reset all state
-    this.history = [];
-    this.currentStep = 0;
-    this.stack = [];
-    this.frames = [];
-    this.globals = new Map();
-    this.openUpvalues = [];
-    this.output = [];
-    this.hasRecordingError = false;
-    this.recordingErrorMessage = '';
+  /** Compile and record the program. Throws the first diagnostic if it does not compile. */
+  public record(options: RecordingOptions | number = {}): void {
+    const opts: RecordingOptions = typeof options === 'number' ? { maxSteps: options } : options;
+    const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+    const maxCheckpoints = Math.max(2, opts.maxCheckpoints ?? DEFAULT_MAX_CHECKPOINTS);
+    let interval = Math.max(1, opts.checkpointInterval ?? DEFAULT_CHECKPOINT_INTERVAL);
 
-    // ── 1. Full compiler pipeline ──────────────────────────────────────────
     const compiled = compile(this.source);
-    if (!compiled.chunk) {
-      throw compiled.diagnostics[0]!;
-    }
-    const chunk = compiled.chunk;
+    if (!compiled.chunk) throw compiled.diagnostics[0]!;
 
-    // ── 2. Bootstrap VM ────────────────────────────────────────────────────
-    this.initGlobals();
+    const started = Date.now();
+    const vm = new VM(this.source, { maxInstructions: 0 });
+    vm.load(compiled.chunk);
 
-    const scriptFn: FunctionValue = {
-      kind: 'function',
-      name: 'main',
-      arity: 0,
-      minArity: 0,
-      chunk,
-      upvalues: [],
-      localNames: [''],
-    };
+    const trace = new TraceLog();
+    let checkpoints: Checkpoint[] = [{ step: -1, state: captureState(vm) }];
+    const tracer = new StepTracer();
+    const step = tracer.step;
 
-    const mainClosure: ClosureValue = {
-      kind: 'closure',
-      fn: scriptFn,
-      upvalues: [],
-    };
+    // Per call depth: the line of the frame's previous step (-1 right after
+    // the frame is entered) and whether that step jumped back in a loop.
+    const lastLine: number[] = [];
+    const loopedBack: boolean[] = [];
+    let previousDepth = 0;
+    let truncatedReason: string | null = null;
 
-    this.push(mainClosure);
-    this.call(mainClosure, 0);
-
-    // ── 3. Step-by-step execution + snapshotting ───────────────────────────
-    let stepCount = 0;
-
-    // Track previous globals to detect changes for highlight
-    let prevGlobals: Map<string, string> = new Map();
-
-    while (this.frames.length > 0 && stepCount < maxSteps) {
-      const frame = this.frames[this.frames.length - 1]!;
-      if (frame.ip >= frame.closure.fn.chunk.code.length) break;
-
-      const ipBefore = frame.ip;
-      const loc = frame.closure.fn.chunk.locations[ipBefore] ?? { line: 1, column: 1, offset: 0 };
-
-      let event: DebuggerEvent;
-      try {
-        event = this.executeInstruction();
-      } catch (err: any) {
-        // Capture error snapshot then stop
-        event = {
-          type: 'error',
-          description: err.message || String(err),
-          loc,
-          stepIndex: stepCount,
-        };
-        const errSnap = this.buildSnapshot(stepCount, ipBefore, loc, event, prevGlobals);
-        this.history.push(errSnap);
-        this.hasRecordingError = true;
-        this.recordingErrorMessage = err.message || String(err);
+    while (vm.status === 'running') {
+      if (trace.length >= maxSteps) {
+        truncatedReason = `Recording stopped after ${maxSteps.toLocaleString('en-US')} steps; the program had not finished.`;
         break;
       }
+      tracer.trace(vm, false);
 
-      event.stepIndex = stepCount;
-      event.loc = loc;
-
-      const snap = this.buildSnapshot(stepCount, ipBefore, loc, event, prevGlobals);
-      this.history.push(snap);
-
-      // Update prev globals map for change detection on next step
-      for (const g of snap.globals) {
-        prevGlobals.set(g.name, g.displayValue);
+      const depth = step.depth;
+      const line = step.loc.line;
+      if (depth > previousDepth) {
+        lastLine[depth] = -1;
+        loopedBack[depth] = false;
       }
+      const lineStart = (lastLine[depth] !== line || loopedBack[depth] === true) && step.kind !== EventKind.Loop;
+      lastLine[depth] = line;
+      loopedBack[depth] = step.kind === EventKind.Loop;
+      previousDepth = depth;
 
-      stepCount++;
+      trace.push(line, step.loc.column, depth, step.kind, step.target, vm.output.length, lineStart);
+
+      if (vm.status === 'running' && trace.length % interval === 0) {
+        checkpoints.push({ step: trace.length - 1, state: captureState(vm) });
+        if (checkpoints.length > maxCheckpoints) {
+          interval *= 2;
+          checkpoints = checkpoints.filter(c => c.step === -1 || (c.step + 1) % interval === 0);
+        }
+      }
     }
 
-    // Patch totalSteps into all snapshots
-    this.totalSteps = this.history.length;
-    for (const snap of this.history) {
-      snap.totalSteps = this.totalSteps;
-    }
+    this.recording = {
+      chunk: compiled.chunk,
+      trace,
+      checkpoints,
+      checkpointInterval: interval,
+      output: vm.output,
+      error: vm.error,
+      truncatedReason,
+      recordMs: Date.now() - started,
+    };
+    this.cursor = new Replayer(this.source, this.recording);
+    this.scratch = new Replayer(this.source, this.recording);
+    this.currentStep = 0;
   }
 
-  // ── Navigation API ──────────────────────────────────────────────────────────
+  public get totalSteps(): number {
+    return this.recording?.trace.length ?? 0;
+  }
+
+  public get hasRecordingError(): boolean {
+    return this.recording?.error != null;
+  }
+
+  public get recordingErrorMessage(): string {
+    return this.recording?.error?.message ?? '';
+  }
+
+  /** The runtime error that ended the recorded run, if any. */
+  public get runtimeError(): RuntimeError | null {
+    return this.recording?.error ?? null;
+  }
+
+  public get isTruncated(): boolean {
+    return this.recording?.truncatedReason != null;
+  }
+
+  public getStats(): RecordingStats {
+    const rec = this.requireRecording();
+    return {
+      totalSteps: rec.trace.length,
+      checkpoints: rec.checkpoints.length,
+      checkpointInterval: rec.checkpointInterval,
+      traceBytes: rec.trace.byteLength,
+      truncated: rec.truncatedReason !== null,
+      ...(rec.truncatedReason !== null ? { truncatedReason: rec.truncatedReason } : {}),
+      recordMs: rec.recordMs,
+    };
+  }
+
+  // ── Instruction-level navigation ───────────────────────────────────────────
 
   public stepForward(): DebuggerState {
-    if (this.currentStep < this.totalSteps - 1) {
-      this.currentStep++;
-    }
-    return this.getCurrentState();
+    return this.gotoStep(this.currentStep + 1);
   }
 
   public stepBackward(): DebuggerState {
-    if (this.currentStep > 0) {
-      this.currentStep--;
-    }
-    return this.getCurrentState();
+    return this.gotoStep(this.currentStep - 1);
   }
 
   public gotoStep(stepIndex: number): DebuggerState {
@@ -182,37 +321,131 @@ export class TimeTravelDebugger {
     return this.gotoStep(this.totalSteps - 1);
   }
 
-  /** Continue to the next breakpoint (or end of program). */
-  public continueToBreakpoint(): DebuggerState {
-    let step = this.currentStep + 1;
-    while (step < this.totalSteps) {
-      const snap = this.history[step]!;
-      if (this.breakpoints.has(snap.sourceLine) && this.breakpoints.get(snap.sourceLine)!.enabled) {
-        break;
-      }
-      step++;
-    }
-    return this.gotoStep(step);
+  // ── Line-level navigation (forward and reverse) ────────────────────────────
+
+  /** Next line start, entering calls. */
+  public stepInto(): DebuggerState {
+    return this.gotoStep(this.nextLineStart(() => true));
   }
 
-  /** Step over — advance one "significant" step (assign, call, return, print). */
+  /** Next line start in this function or a caller; calls made from this line run to completion. */
   public stepOver(): DebuggerState {
-    let step = this.currentStep + 1;
-    const interestingTypes = new Set(['assign', 'call', 'return', 'print', 'halt', 'error']);
-    while (step < this.totalSteps) {
-      const snap = this.history[step]!;
-      if (interestingTypes.has(snap.event.type)) {
-        break;
-      }
-      step++;
-    }
-    return this.gotoStep(step);
+    const depth = this.trace.depth[this.currentStep]!;
+    return this.gotoStep(this.nextLineStart(i => this.trace.depth[i]! <= depth));
   }
 
-  // ── Breakpoints API ─────────────────────────────────────────────────────────
+  /** Run until the current function returns. */
+  public stepOut(): DebuggerState {
+    const { depth } = this.trace;
+    const d = depth[this.currentStep]!;
+    for (let i = this.currentStep + 1; i < this.totalSteps; i++) {
+      if (depth[i]! < d) return this.gotoStep(i);
+    }
+    return this.gotoEnd();
+  }
 
-  public setBreakpoint(line: number): void {
-    this.breakpoints.set(line, { line, enabled: true });
+  /** Previous line start, entering calls (lands on the last line a callee ran). */
+  public reverseStepInto(): DebuggerState {
+    return this.gotoStep(this.previousLineStart(this.currentStep, () => true));
+  }
+
+  /** Previous line start in this function or a caller, skipping over calls. */
+  public reverseStepOver(): DebuggerState {
+    const depth = this.trace.depth[this.currentStep]!;
+    return this.gotoStep(this.previousLineStart(this.currentStep, i => this.trace.depth[i]! <= depth));
+  }
+
+  /** Back to the start of the line that called the current function. */
+  public reverseStepOut(): DebuggerState {
+    const { depth } = this.trace;
+    const d = depth[this.currentStep]!;
+    for (let i = this.currentStep - 1; i >= 0; i--) {
+      if (depth[i]! < d) {
+        const callerDepth = depth[i]!;
+        return this.gotoStep(this.previousLineStart(i + 1, j => this.trace.depth[j]! <= callerDepth));
+      }
+    }
+    return this.restart();
+  }
+
+  /** Run forward to the next breakpoint whose condition holds (or the end). */
+  public continueToBreakpoint(): DebuggerState {
+    return this.gotoStep(this.nextLineStart(i => this.breakpointHit(i)));
+  }
+
+  /** Run backward to the previous breakpoint whose condition holds (or the start). */
+  public reverseContinue(): DebuggerState {
+    return this.gotoStep(this.previousLineStart(this.currentStep, i => this.breakpointHit(i)));
+  }
+
+  public navigate(command: NavigationCommand): DebuggerState {
+    switch (command) {
+      case 'stepForward': return this.stepForward();
+      case 'stepBackward': return this.stepBackward();
+      case 'stepInto': return this.stepInto();
+      case 'stepOver': return this.stepOver();
+      case 'stepOut': return this.stepOut();
+      case 'reverseStepInto': return this.reverseStepInto();
+      case 'reverseStepOver': return this.reverseStepOver();
+      case 'reverseStepOut': return this.reverseStepOut();
+      case 'continue': return this.continueToBreakpoint();
+      case 'reverseContinue': return this.reverseContinue();
+      case 'restart': return this.restart();
+      case 'gotoEnd': return this.gotoEnd();
+    }
+  }
+
+  private nextLineStart(accept: (step: number) => boolean): number {
+    const { lineStart } = this.trace;
+    for (let i = this.currentStep + 1; i < this.totalSteps; i++) {
+      if (lineStart[i] === 1 && accept(i)) return i;
+    }
+    return this.totalSteps - 1;
+  }
+
+  /** Latest line start before `before` that `accept`s, or 0. */
+  private previousLineStart(before: number, accept: (step: number) => boolean): number {
+    const { lineStart } = this.trace;
+    for (let i = before - 1; i >= 0; i--) {
+      if (lineStart[i] === 1 && accept(i)) return i;
+    }
+    return 0;
+  }
+
+  // ── Watchpoints ─────────────────────────────────────────────────────────────
+
+  /**
+   * The closest step before (`backward`) or after (`forward`) `from` that wrote
+   * the variable `name`, including writes through it such as `arr[0] = 1` or
+   * `arr.push(x)`. Returns -1 when there is none. Variables are matched by
+   * name, so same-named locals in different functions all count.
+   */
+  public findChange(name: string, direction: 'backward' | 'forward', from = this.currentStep): number {
+    const id = this.trace.nameId(name);
+    if (id < 0) return -1;
+    const { target } = this.trace;
+    if (direction === 'backward') {
+      for (let i = Math.min(from, this.totalSteps) - 1; i >= 0; i--) if (target[i] === id) return i;
+    } else {
+      for (let i = Math.max(from, -1) + 1; i < this.totalSteps; i++) if (target[i] === id) return i;
+    }
+    return -1;
+  }
+
+  // ── Breakpoints ─────────────────────────────────────────────────────────────
+
+  /**
+   * Set (or replace) a breakpoint. A condition is compiled immediately, so a
+   * syntax error in it is thrown here rather than when the breakpoint is hit.
+   */
+  public setBreakpoint(line: number, condition?: string): void {
+    const entry: BreakpointEntry = { line, enabled: true };
+    const trimmed = condition?.trim();
+    if (trimmed) {
+      entry.condition = trimmed;
+      entry.conditionChunk = compileCondition(trimmed);
+    }
+    this.breakpoints.set(line, entry);
   }
 
   public removeBreakpoint(line: number): void {
@@ -220,52 +453,89 @@ export class TimeTravelDebugger {
   }
 
   public toggleBreakpoint(line: number): void {
-    if (this.breakpoints.has(line)) {
-      this.removeBreakpoint(line);
-    } else {
-      this.setBreakpoint(line);
-    }
+    if (this.breakpoints.has(line)) this.removeBreakpoint(line);
+    else this.setBreakpoint(line);
   }
 
   public getBreakpoints(): Breakpoint[] {
-    return Array.from(this.breakpoints.values());
+    return Array.from(this.breakpoints.values(), ({ line, enabled, condition }) =>
+      (condition === undefined ? { line, enabled } : { line, enabled, condition }));
   }
 
   public clearBreakpoints(): void {
     this.breakpoints.clear();
   }
 
-  // ── Inspection API ──────────────────────────────────────────────────────────
+  private breakpointHit(step: number): boolean {
+    const bp = this.breakpoints.get(this.trace.line[step]!);
+    if (!bp || !bp.enabled) return false;
+    if (!bp.conditionChunk) return true;
+    return this.conditionHolds(bp.conditionChunk, step);
+  }
+
+  /**
+   * Evaluate a breakpoint condition against the program state at `step`. It
+   * runs on its own VM with copies of the visible variables, so a condition
+   * with side effects (`arr.pop() > 0`) cannot change the recording. A
+   * condition that fails at runtime counts as true, so the problem is visible.
+   */
+  private conditionHolds(conditionChunk: Chunk, step: number): boolean {
+    const scratch = this.requireScratch();
+    scratch.seek(step, false);
+    const copier = new StateCopier(scratch.vm.stack);
+    const evaluator = new VM(undefined, { maxInstructions: CONDITION_MAX_INSTRUCTIONS });
+    evaluator.load(conditionChunk);
+    for (const [name, value] of visibleVariables(scratch.vm)) {
+      evaluator.globals.set(name, copier.value(value));
+    }
+    if (evaluator.execute(Infinity) !== 'halted') return true;
+    return isTruthy(evaluator.globals.get(CONDITION_RESULT) ?? null);
+  }
+
+  // ── Inspection ──────────────────────────────────────────────────────────────
 
   public getCurrentState(): DebuggerState {
-    const snap = this.history[this.currentStep] ?? this.createEmptySnapshot();
+    const total = this.totalSteps;
     return {
       currentStep: this.currentStep,
-      totalSteps: this.totalSteps,
+      totalSteps: total,
       isAtStart: this.currentStep === 0,
-      isAtEnd: this.currentStep >= Math.max(0, this.totalSteps - 1),
+      isAtEnd: this.currentStep >= Math.max(0, total - 1),
       hasError: this.hasRecordingError,
-      snapshot: snap,
+      isTruncated: this.isTruncated,
+      snapshot: this.getCurrentSnapshot(),
     };
   }
 
   public getCurrentSnapshot(): ExecutionSnapshot {
-    return this.history[this.currentStep] ?? this.createEmptySnapshot();
+    if (!this.cursor || this.totalSteps === 0) return emptySnapshot();
+    return this.buildSnapshot(this.cursor, this.currentStep);
   }
 
+  /** The full program state at any step, without moving the current position. */
+  public snapshotAt(step: number): ExecutionSnapshot {
+    if (this.totalSteps === 0) return emptySnapshot();
+    const clamped = Math.max(0, Math.min(step, this.totalSteps - 1));
+    return this.buildSnapshot(this.requireScratch(), clamped);
+  }
+
+  /** Events for steps `from..to` (inclusive, clamped to the recording). */
+  public getEvents(from: number, to: number): DebuggerEvent[] {
+    const first = Math.max(0, from);
+    const last = Math.min(to, this.totalSteps - 1);
+    if (last < first) return [];
+    return this.requireScratch().describeRange(first, last);
+  }
+
+  /** Every event of the recording. Replays the whole program; prefer getEvents for large runs. */
   public getTimeline(): DebuggerEvent[] {
-    return this.history.map(h => h.event);
-  }
-
-  public getHistory(): ExecutionSnapshot[] {
-    return this.history;
+    return this.getEvents(0, this.totalSteps - 1);
   }
 
   public getVariables(): { locals: VariableSnapshot[]; globals: VariableSnapshot[] } {
     const snap = this.getCurrentSnapshot();
-    const activeFrame = snap.frames[snap.frames.length - 1];
     return {
-      locals: activeFrame ? activeFrame.locals : [],
+      locals: snap.frames[snap.frames.length - 1]?.locals ?? [],
       globals: snap.globals,
     };
   }
@@ -278,526 +548,86 @@ export class TimeTravelDebugger {
     return this.getCurrentSnapshot().loc;
   }
 
-  /** Get all steps that touch a given source line — useful for line-level stepping. */
+  /** Every step that executed an instruction on `line`. */
   public getStepsForLine(line: number): number[] {
-    return this.history
-      .filter(s => s.sourceLine === line)
-      .map(s => s.stepIndex);
+    const steps: number[] = [];
+    const lines = this.trace.line;
+    for (let i = 0; i < this.totalSteps; i++) if (lines[i] === line) steps.push(i);
+    return steps;
   }
 
-  // ── Snapshot Building ────────────────────────────────────────────────────────
+  /** How many times each line started executing, for a coverage/heat-map view. */
+  public getLineHits(): Map<number, number> {
+    const hits = new Map<number, number>();
+    const { line, lineStart } = this.trace;
+    for (let i = 0; i < this.totalSteps; i++) {
+      if (lineStart[i] === 1) hits.set(line[i]!, (hits.get(line[i]!) ?? 0) + 1);
+    }
+    return hits;
+  }
 
-  private buildSnapshot(
-    stepIndex: number,
-    ipBefore: number,
-    loc: SourceLocation,
-    event: DebuggerEvent,
-    prevGlobals: Map<string, string>,
-  ): ExecutionSnapshot {
-    const globals = this.captureGlobals(prevGlobals);
+  private buildSnapshot(replayer: Replayer, step: number): ExecutionSnapshot {
+    const rec = this.requireRecording();
+    replayer.seek(step, true);
+    const vm = replayer.vm;
+    const event = replayer.event();
+    const changed = rec.trace.targetName(step);
     return {
-      stepIndex,
-      totalSteps: 0, // patched after
-      ip: ipBefore,
-      loc,
-      sourceLine: loc.line,
-      sourceColumn: loc.column,
-      stackDisplay: this.stack.map(v => valueToString(v)),
-      frames: this.captureFrames(loc),
-      globals,
-      output: [...this.output],
+      stepIndex: step,
+      totalSteps: rec.trace.length,
+      ip: replayer.instructionPointer(),
+      loc: event.loc,
+      sourceLine: event.loc.line,
+      sourceColumn: event.loc.column,
+      stackDisplay: vm.stack.map(v => (v === undefined ? '(missing argument)' : displayValue(v))),
+      frames: frameViews(vm, changed),
+      globals: globalViews(vm, changed),
+      output: rec.output.slice(0, rec.trace.outputLength[step]),
       event,
     };
   }
 
-  private captureFrames(currentLoc: SourceLocation): FrameSnapshot[] {
-    const snapshots: FrameSnapshot[] = [];
-
-    for (let fIdx = 0; fIdx < this.frames.length; fIdx++) {
-      const f = this.frames[fIdx]!;
-      const isTop = fIdx === this.frames.length - 1;
-      const loc = isTop
-        ? currentLoc
-        : (f.closure.fn.chunk.locations[Math.max(0, f.ip - 1)] ?? currentLoc);
-
-      const locals: VariableSnapshot[] = [];
-      const localNames = f.closure.fn.localNames ?? [];
-      const nextFrameSlot =
-        fIdx + 1 < this.frames.length ? this.frames[fIdx + 1]!.slots : this.stack.length;
-
-      for (let s = f.slots; s < nextFrameSlot; s++) {
-        const localIndex = s - f.slots;
-        const name = localNames[localIndex]
-          || (localIndex === 0 ? (f.closure.fn.name || '<fn>') : `$slot${localIndex}`);
-
-        // Skip internal compiler-emitted helper slots (start with $)
-        if (!name || name.startsWith('$')) continue;
-
-        const val = this.stack[s];
-        if (val === undefined) continue;
-
-        locals.push({
-          name,
-          value: this.cloneValue(val),
-          type: valueType(val),
-          displayValue: valueToString(val),
-        });
-      }
-
-      snapshots.push({
-        id: fIdx,
-        fnName: f.closure.fn.name || 'anonymous',
-        loc,
-        ip: f.ip,
-        slots: f.slots,
-        locals,
-      });
-    }
-
-    return snapshots;
+  private get trace(): TraceLog {
+    return this.requireRecording().trace;
   }
 
-  private captureGlobals(prevGlobals: Map<string, string>): VariableSnapshot[] {
-    const result: VariableSnapshot[] = [];
-
-    for (const [name, val] of this.globals.entries()) {
-      if (BUILTIN_NAMES.has(name)) continue;
-      const displayValue = valueToString(val);
-      result.push({
-        name,
-        value: this.cloneValue(val),
-        type: valueType(val),
-        displayValue,
-        changed: prevGlobals.has(name) && prevGlobals.get(name) !== displayValue,
-      });
-    }
-
-    return result;
+  private requireRecording(): Recording {
+    if (!this.recording) throw new Error('Nothing recorded yet: call record() first.');
+    return this.recording;
   }
 
-  /**
-   * Deep-copy a value for a snapshot. `copies` maps each original container to
-   * its copy, so shared references stay shared and cycles terminate.
-   */
-  private cloneValue(v: Value, copies: Map<object, Value> = new Map()): Value {
-    if (v === null || typeof v !== 'object') return v;
-    const existing = copies.get(v);
-    if (existing) return existing;
-    if (v.kind === 'array') {
-      const copy: ArrayValue = { kind: 'array', elements: [] };
-      copies.set(v, copy);
-      for (const e of v.elements) copy.elements.push(this.cloneValue(e, copies));
-      return copy;
-    }
-    if (v.kind === 'object') {
-      const copy: ObjectValue = { kind: 'object', fields: new Map(), structName: v.structName };
-      copies.set(v, copy);
-      for (const [k, val] of v.fields.entries()) {
-        copy.fields.set(k, this.cloneValue(val, copies));
-      }
-      return copy;
-    }
-    // closures / functions / natives / struct types: immutable, share reference
-    return v;
+  private requireScratch(): Replayer {
+    this.requireRecording();
+    return this.scratch!;
   }
+}
 
-  private createEmptySnapshot(): ExecutionSnapshot {
-    return {
-      stepIndex: 0,
-      totalSteps: 0,
-      ip: 0,
-      loc: { line: 1, column: 1, offset: 0 },
-      sourceLine: 1,
-      sourceColumn: 1,
-      stackDisplay: [],
-      frames: [],
-      globals: [],
-      output: [],
-      event: {
-        type: 'step',
-        description: 'Initial state',
-        loc: { line: 1, column: 1, offset: 0 },
-        stepIndex: 0,
-      },
-    };
+/** Compile a breakpoint condition into a script that stores its value in a global. */
+function compileCondition(condition: string): Chunk {
+  const source = `let ${CONDITION_RESULT} = (${condition})`;
+  const tokens = new Lexer(source).tokenize();
+  const { program, errors } = new Parser(tokens, source).parseProgram();
+  if (errors.length > 0) {
+    throw new CodeTimeError(`Invalid breakpoint condition '${condition}': ${errors[0]!.message}`, { line: 1, column: 1, offset: 0 });
   }
+  // The semantic analyzer is skipped on purpose: the condition refers to the
+  // paused program's variables, which are supplied as globals when it runs.
+  return new BytecodeCompiler('script', 'main').compile(program);
+}
 
-  // ── VM Instruction Execution Engine ──────────────────────────────────────────
-
-  private initGlobals(): void {
-    for (const [name, nativeVal] of createNatives(line => this.output.push(line))) {
-      this.globals.set(name, nativeVal);
-    }
-  }
-
-  private executeInstruction(): DebuggerEvent {
-    // Always fetch the live top frame — OP_RETURN can modify the frame stack
-    const frame = this.frames[this.frames.length - 1]!;
-    const op = frame.closure.fn.chunk.code[frame.ip++] as OpCode;
-    const loc = frame.closure.fn.chunk.locations[frame.ip - 1] ?? { line: 1, column: 1, offset: 0 };
-    const ch = frame.closure.fn.chunk;
-
-    const mkEvent = (
-      type: DebuggerEvent['type'],
-      description: string,
-      extra: Partial<DebuggerEvent> = {}
-    ): DebuggerEvent => ({ type, description, loc, stepIndex: 0, ...extra });
-
-    switch (op) {
-      // ── Stack literals ──────────────────────────────────────────────────
-      case OpCode.OP_CONSTANT: {
-        const c = ch.constants[ch.code[frame.ip++]!]!;
-        this.push(c);
-        return mkEvent('step', `Load ${valueToString(c)}`);
-      }
-      case OpCode.OP_NULL:
-        this.push(null);
-        return mkEvent('step', 'Push null');
-      case OpCode.OP_TRUE:
-        this.push(true);
-        return mkEvent('step', 'Push true');
-      case OpCode.OP_FALSE:
-        this.push(false);
-        return mkEvent('step', 'Push false');
-      case OpCode.OP_POP:
-        this.pop();
-        return mkEvent('step', 'Pop');
-      case OpCode.OP_DUP:
-        this.push(this.peek(0));
-        return mkEvent('step', 'Duplicate stack top');
-      case OpCode.OP_DUP2: {
-        const a = this.peek(1), b = this.peek(0);
-        this.push(a);
-        this.push(b);
-        return mkEvent('step', 'Duplicate top two stack values');
-      }
-      case OpCode.OP_JUMP_IF_ARG_PRESENT: {
-        const slot = ch.code[frame.ip++]!;
-        const offset = (ch.code[frame.ip++]! << 8) | ch.code[frame.ip++]!;
-        const name = frame.closure.fn.localNames?.[slot] ?? `local_${slot}`;
-        if (this.stack[frame.slots + slot] !== undefined) {
-          frame.ip += offset;
-          return mkEvent('branch', `Argument ${name} was passed`);
-        }
-        return mkEvent('branch', `Argument ${name} missing → use default`);
-      }
-
-      // ── Variable access ─────────────────────────────────────────────────
-      case OpCode.OP_GET_LOCAL: {
-        const slot = ch.code[frame.ip++]!;
-        const val = this.stack[frame.slots + slot]!;
-        const name = frame.closure.fn.localNames?.[slot] ?? `local_${slot}`;
-        this.push(val);
-        return mkEvent('step', `Read local ${name} → ${valueToString(val)}`, { varName: name, varValue: valueToString(val) });
-      }
-      case OpCode.OP_SET_LOCAL: {
-        const slot = ch.code[frame.ip++]!;
-        const val = this.peek(0);
-        const name = frame.closure.fn.localNames?.[slot] ?? `local_${slot}`;
-        this.stack[frame.slots + slot] = val;
-        return mkEvent('assign', `${name} = ${valueToString(val)}`, { varName: name, varValue: valueToString(val) });
-      }
-      case OpCode.OP_GET_GLOBAL: {
-        const name = ch.constants[ch.code[frame.ip++]!] as string;
-        const val = this.globals.get(name) ?? null;
-        this.push(val);
-        return mkEvent('step', `Read ${name} → ${valueToString(val)}`, { varName: name, varValue: valueToString(val) });
-      }
-      case OpCode.OP_DEFINE_GLOBAL: {
-        const name = ch.constants[ch.code[frame.ip++]!] as string;
-        const val = this.pop();
-        this.globals.set(name, val);
-        return mkEvent('assign', `let ${name} = ${valueToString(val)}`, { varName: name, varValue: valueToString(val) });
-      }
-      case OpCode.OP_SET_GLOBAL: {
-        const name = ch.constants[ch.code[frame.ip++]!] as string;
-        const val = this.peek(0);
-        this.globals.set(name, val);
-        return mkEvent('assign', `${name} = ${valueToString(val)}`, { varName: name, varValue: valueToString(val) });
-      }
-      case OpCode.OP_GET_UPVALUE: {
-        const slot = ch.code[frame.ip++]!;
-        const upval = frame.closure.upvalues[slot]!;
-        const val = upval.closed !== null ? upval.closed : this.stack[upval.location]!;
-        this.push(val);
-        return mkEvent('step', `Read captured var → ${valueToString(val)}`);
-      }
-      case OpCode.OP_SET_UPVALUE: {
-        const slot = ch.code[frame.ip++]!;
-        const upval = frame.closure.upvalues[slot]!;
-        const val = this.peek(0);
-        if (upval.closed !== null) upval.closed = val;
-        else this.stack[upval.location] = val;
-        return mkEvent('assign', `Captured var = ${valueToString(val)}`);
-      }
-
-      // ── Arithmetic ──────────────────────────────────────────────────────
-      case OpCode.OP_ADD: {
-        const b = this.pop(); const a = this.pop();
-        if (typeof a === 'number' && typeof b === 'number') {
-          const r = a + b; this.push(r);
-          return mkEvent('step', `${a} + ${b} = ${r}`);
-        }
-        const r = valueToString(a) + valueToString(b); this.push(r);
-        return mkEvent('step', `"${valueToString(a)}" + "${valueToString(b)}" = "${r}"`);
-      }
-      case OpCode.OP_SUB: { const b = this.pop() as number, a = this.pop() as number, r = a - b; this.push(r); return mkEvent('step', `${a} − ${b} = ${r}`); }
-      case OpCode.OP_MUL: { const b = this.pop() as number, a = this.pop() as number, r = a * b; this.push(r); return mkEvent('step', `${a} × ${b} = ${r}`); }
-      case OpCode.OP_DIV: {
-        const b = this.pop() as number, a = this.pop() as number;
-        if (b === 0) throw new Error('Division by zero.');
-        const r = Number.isInteger(a) && Number.isInteger(b) && a % b === 0 ? Math.trunc(a / b) : a / b;
-        this.push(r);
-        return mkEvent('step', `${a} ÷ ${b} = ${r}`);
-      }
-      case OpCode.OP_MOD: { const b = this.pop() as number, a = this.pop() as number, r = a % b; this.push(r); return mkEvent('step', `${a} % ${b} = ${r}`); }
-      case OpCode.OP_POW: { const b = this.pop() as number, a = this.pop() as number, r = a ** b; this.push(r); return mkEvent('step', `${a} ** ${b} = ${r}`); }
-      case OpCode.OP_NEGATE: { const a = this.pop() as number; this.push(-a); return mkEvent('step', `negate → ${-a}`); }
-      case OpCode.OP_NOT: { const a = this.pop(); const r = !isTruthy(a); this.push(r); return mkEvent('step', `not ${valueToString(a)} → ${r}`); }
-
-      // ── Comparisons ─────────────────────────────────────────────────────
-      case OpCode.OP_EQUAL: { const b = this.pop(), a = this.pop(), r = valuesEqual(a, b); this.push(r); return mkEvent('step', `${valueToString(a)} == ${valueToString(b)} → ${r}`); }
-      case OpCode.OP_NOT_EQUAL: { const b = this.pop(), a = this.pop(), r = !valuesEqual(a, b); this.push(r); return mkEvent('step', `${valueToString(a)} != ${valueToString(b)} → ${r}`); }
-      case OpCode.OP_GREATER: { const b = this.pop() as any, a = this.pop() as any, r = a > b; this.push(r); return mkEvent('step', `${a} > ${b} → ${r}`); }
-      case OpCode.OP_GREATER_EQUAL: { const b = this.pop() as any, a = this.pop() as any, r = a >= b; this.push(r); return mkEvent('step', `${a} >= ${b} → ${r}`); }
-      case OpCode.OP_LESS: { const b = this.pop() as any, a = this.pop() as any, r = a < b; this.push(r); return mkEvent('step', `${a} < ${b} → ${r}`); }
-      case OpCode.OP_LESS_EQUAL: { const b = this.pop() as any, a = this.pop() as any, r = a <= b; this.push(r); return mkEvent('step', `${a} <= ${b} → ${r}`); }
-
-      // ── Control flow ─────────────────────────────────────────────────────
-      case OpCode.OP_JUMP: {
-        const offset = (ch.code[frame.ip++]! << 8) | ch.code[frame.ip++]!;
-        frame.ip += offset;
-        return mkEvent('branch', `Jump forward +${offset}`);
-      }
-      case OpCode.OP_JUMP_IF_FALSE: {
-        const offset = (ch.code[frame.ip++]! << 8) | ch.code[frame.ip++]!;
-        const cond = this.peek(0);
-        if (!isTruthy(cond)) { frame.ip += offset; return mkEvent('branch', `Branch (false) → skip ${offset} bytes`); }
-        return mkEvent('branch', `Branch (true) → continue`);
-      }
-      case OpCode.OP_LOOP: {
-        const offset = (ch.code[frame.ip++]! << 8) | ch.code[frame.ip++]!;
-        frame.ip -= offset;
-        return mkEvent('loop', `Loop back −${offset}`);
-      }
-
-      // ── Functions ────────────────────────────────────────────────────────
-      case OpCode.OP_CALL: {
-        const argCount = ch.code[frame.ip++]!;
-        const callee = this.peek(argCount);
-        const fnName =
-          callee && typeof callee === 'object'
-            ? (callee as any).fn?.name ?? (callee as any).name ?? 'fn'
-            : 'fn';
-        this.callValue(callee, argCount);
-        return mkEvent('call', `Call ${fnName}(${argCount} args)`, { fnName });
-      }
-      case OpCode.OP_CLOSURE: {
-        const constIdx = ch.code[frame.ip++]!;
-        const fnVal = ch.constants[constIdx] as FunctionValue;
-        const closure: ClosureValue = { kind: 'closure', fn: fnVal, upvalues: [] };
-        for (let i = 0; i < fnVal.upvalues.length; i++) {
-          const isLocal = ch.code[frame.ip++] === 1;
-          const index = ch.code[frame.ip++]!;
-          closure.upvalues.push(
-            isLocal ? this.captureUpvalue(frame.slots + index) : frame.closure.upvalues[index]!
-          );
-        }
-        this.push(closure);
-        return mkEvent('step', `Create closure <fn ${fnVal.name}>`, { fnName: fnVal.name });
-      }
-      case OpCode.OP_CLOSE_UPVALUE: {
-        this.closeUpvalues(this.stack.length - 1);
-        this.pop();
-        return mkEvent('step', 'Close upvalue');
-      }
-      case OpCode.OP_RETURN: {
-        const result = this.pop();
-        const returningFn = frame.closure.fn.name || 'main';
-        this.closeUpvalues(frame.slots);
-        this.frames.pop();
-        if (this.frames.length === 0) {
-          return mkEvent('halt', `Program ended`, { fnName: returningFn });
-        }
-        this.stack.length = frame.slots;
-        this.push(result);
-        return mkEvent('return', `${returningFn}() → ${valueToString(result)}`, { fnName: returningFn });
-      }
-
-      // ── Collections ──────────────────────────────────────────────────────
-      case OpCode.OP_ARRAY: {
-        const count = ch.code[frame.ip++]!;
-        const elements: Value[] = Array(count);
-        for (let i = count - 1; i >= 0; i--) elements[i] = this.pop();
-        const arrVal: ArrayValue = { kind: 'array', elements };
-        this.push(arrVal);
-        return mkEvent('step', `Build array[${count}]`);
-      }
-      case OpCode.OP_OBJECT: {
-        const count = ch.code[frame.ip++]!;
-        const items: [string, Value][] = [];
-        for (let i = 0; i < count; i++) {
-          const val = this.pop(), key = this.pop() as string;
-          items.unshift([key, val]);
-        }
-        const fields = new Map<string, Value>(items);
-        const objVal: ObjectValue = { kind: 'object', fields };
-        this.push(objVal);
-        return mkEvent('step', `Build object{${count} fields}`);
-      }
-      case OpCode.OP_GET_INDEX: {
-        const index = this.pop(), target = this.pop();
-        if (typeof target === 'object' && target !== null) {
-          if (target.kind === 'array') {
-            const idx = Math.trunc(index as number);
-            if (idx < 0 || idx >= target.elements.length) throw new Error(`Array index ${idx} out of bounds (length ${target.elements.length}).`);
-            const val = target.elements[idx]!;
-            this.push(val);
-            return mkEvent('step', `arr[${idx}] → ${valueToString(val)}`);
-          }
-          if (target.kind === 'object') {
-            const key = valueToString(index);
-            const val = target.fields.get(key) ?? null;
-            this.push(val);
-            return mkEvent('step', `obj["${key}"] → ${valueToString(val)}`);
-          }
-        }
-        if (typeof target === 'string') {
-          if (typeof index !== 'number') throw new Error(`String index must be a number.`);
-          const idx = Math.trunc(index);
-          if (idx < 0 || idx >= target.length) throw new Error(`String index out of bounds: ${idx}.`);
-          this.push(target[idx]!);
-          return mkEvent('step', `str[${idx}] → ${target[idx]}`);
-        }
-        throw new Error(`Cannot index into ${valueType(target)}.`);
-      }
-      case OpCode.OP_SET_INDEX: {
-        const val = this.pop(), index = this.pop(), target = this.pop();
-        if (typeof target === 'object' && target !== null && target.kind === 'array') {
-          const idx = Math.trunc(index as number);
-          target.elements[idx] = val;
-          this.push(val);
-          return mkEvent('assign', `arr[${idx}] = ${valueToString(val)}`);
-        }
-        if (typeof target === 'object' && target !== null && target.kind === 'object') {
-          target.fields.set(valueToString(index), val);
-          this.push(val);
-          return mkEvent('assign', `obj["${valueToString(index)}"] = ${valueToString(val)}`);
-        }
-        throw new Error(`Cannot set index on ${valueType(target)}.`);
-      }
-      case OpCode.OP_GET_PROPERTY: {
-        const propName = ch.constants[ch.code[frame.ip++]!] as string;
-        const target = this.pop();
-        if (typeof target === 'object' && target !== null && target.kind === 'object') {
-          const val = target.fields.get(propName) ?? null;
-          this.push(val);
-          return mkEvent('step', `.${propName} → ${valueToString(val)}`);
-        }
-        const builtin = getBuiltinProperty(target, propName);
-        if (builtin !== undefined) {
-          this.push(builtin);
-          return mkEvent('step', `.${propName} → ${valueToString(builtin)}`);
-        }
-        throw new Error(`Property '${propName}' not found on ${valueType(target)}.`);
-      }
-      case OpCode.OP_SET_PROPERTY: {
-        const propName = ch.constants[ch.code[frame.ip++]!] as string;
-        const val = this.pop(), target = this.pop();
-        if (typeof target === 'object' && target !== null && target.kind === 'object') {
-          target.fields.set(propName, val);
-          this.push(val);
-          return mkEvent('assign', `.${propName} = ${valueToString(val)}`);
-        }
-        throw new Error(`Cannot set property on ${valueType(target)}.`);
-      }
-
-      // ── I/O ──────────────────────────────────────────────────────────────
-      case OpCode.OP_PRINT: {
-        const argCount = ch.code[frame.ip++]!;
-        const args: Value[] = Array(argCount);
-        for (let i = argCount - 1; i >= 0; i--) args[i] = this.pop();
-        const line = args.map(a => valueToString(a)).join(' ');
-        this.output.push(line);
-        this.push(null);
-        return mkEvent('print', `"${line}"`);
-      }
-
-      case OpCode.OP_HALT:
-        return mkEvent('halt', 'Halt');
-
-      default:
-        return mkEvent('step', `Opcode ${op}`);
-    }
-  }
-
-  // ── VM Helpers ────────────────────────────────────────────────────────────
-
-  private callValue(callee: Value, argCount: number): void {
-    if (typeof callee === 'object' && callee !== null) {
-      if (callee.kind === 'closure') {
-        this.call(callee, argCount);
-        return;
-      }
-      if (callee.kind === 'native') {
-        const args: Value[] = Array(argCount);
-        for (let i = argCount - 1; i >= 0; i--) args[i] = this.pop();
-        this.pop(); // pop native itself
-        this.push(callee.fn(args));
-        return;
-      }
-      if (callee.kind === 'struct') {
-        if (argCount !== callee.fields.length) {
-          throw new Error(`Struct '${callee.name}' expects ${callee.fields.length} arguments, got ${argCount}.`);
-        }
-        const args = this.stack.splice(this.stack.length - argCount, argCount);
-        this.pop();
-        this.push(instantiateStruct(callee, args));
-        return;
-      }
-    }
-    throw new Error(`Cannot call ${valueType(callee)}.`);
-  }
-
-  private call(closure: ClosureValue, argCount: number): void {
-    if (argCount < closure.fn.minArity || argCount > closure.fn.arity) {
-      throw new Error(`Function '${closure.fn.name}' expects ${closure.fn.arity} arguments, got ${argCount}.`);
-    }
-    if (this.frames.length >= FRAMES_MAX) throw new Error('Stack overflow (max call depth exceeded).');
-    for (let i = argCount; i < closure.fn.arity; i++) {
-      this.stack.push(undefined as unknown as Value); // missing optional argument
-    }
-    this.frames.push({ closure, ip: 0, slots: this.stack.length - closure.fn.arity - 1 });
-  }
-
-  private captureUpvalue(localIndex: number): Upvalue {
-    for (const u of this.openUpvalues) { if (u.location === localIndex) return u; }
-    const u: Upvalue = { location: localIndex, closed: null };
-    this.openUpvalues.push(u);
-    return u;
-  }
-
-  private closeUpvalues(lastSlot: number): void {
-    for (let i = this.openUpvalues.length - 1; i >= 0; i--) {
-      const u = this.openUpvalues[i]!;
-      if (u.location >= lastSlot) {
-        u.closed = this.stack[u.location]!;
-        this.openUpvalues.splice(i, 1);
-      }
-    }
-  }
-
-  private push(val: Value): void {
-    if (this.stack.length >= STACK_MAX) throw new Error('Value stack overflow.');
-    this.stack.push(val);
-  }
-
-  private pop(): Value {
-    if (this.stack.length === 0) throw new Error('Value stack underflow.');
-    return this.stack.pop()!;
-  }
-
-  private peek(distance: number): Value {
-    return this.stack[this.stack.length - 1 - distance]!;
-  }
+function emptySnapshot(): ExecutionSnapshot {
+  const loc: SourceLocation = { line: 1, column: 1, offset: 0 };
+  return {
+    stepIndex: 0,
+    totalSteps: 0,
+    ip: 0,
+    loc,
+    sourceLine: 1,
+    sourceColumn: 1,
+    stackDisplay: [],
+    frames: [],
+    globals: [],
+    output: [],
+    event: { type: 'step', description: 'Initial state', loc, stepIndex: 0 },
+  };
 }

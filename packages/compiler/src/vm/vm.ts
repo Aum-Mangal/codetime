@@ -3,7 +3,7 @@ import {
   Value,
   ClosureValue,
   FunctionValue,
-  NativeFunctionValue,
+  NativeCallContext,
   Upvalue,
   ArrayValue,
   ObjectValue,
@@ -73,17 +73,26 @@ export interface VMOptions {
   maxInstructions?: number;
 }
 
+/**
+ * - `ready`: nothing loaded yet
+ * - `running`: a program is loaded and has more instructions to execute
+ * - `halted`: the program finished normally
+ * - `error`: a runtime error stopped the program (see `VM.error`)
+ */
+export type VMStatus = 'ready' | 'running' | 'halted' | 'error';
+
 export const DEFAULT_MAX_INSTRUCTIONS = 10_000_000;
 
 const STACK_MAX = 4096;
 const FRAMES_MAX = 256;
+const UNKNOWN_LOC: SourceLocation = { line: 1, column: 1, offset: 0 };
 
 /**
  * Marker the VM places in parameter slots whose argument was not passed. The
  * function prologue (OP_JUMP_IF_ARG_PRESENT) replaces it with the default
  * value before any user code runs, so it never escapes into the program.
  */
-const MISSING_ARG = undefined as unknown as Value;
+export const MISSING_ARG = undefined as unknown as Value;
 
 /** Comparisons are only defined between two numbers or two strings. */
 function checkComparable(a: Value, b: Value, op: string): void {
@@ -93,6 +102,15 @@ function checkComparable(a: Value, b: Value, op: string): void {
   }
 }
 
+/**
+ * The CodeTime bytecode interpreter.
+ *
+ * The VM is resumable: `load()` prepares a program and `execute(n)` runs up to
+ * n instructions, so the same engine serves the CLI (run to completion) and
+ * the time-travel debugger (one instruction at a time, with snapshots of the
+ * public state fields in between). All mutable execution state lives in the
+ * public fields below; debugger/snapshot.ts captures and restores them.
+ */
 export class VM {
   public stack: Value[] = [];
   public frames: CallFrame[] = [];
@@ -100,31 +118,27 @@ export class VM {
   public openUpvalues: Upvalue[] = [];
   public output: string[] = [];
   public source?: string;
+
+  public status: VMStatus = 'ready';
+  /** The program's result once `status` is `halted`. */
+  public result: Value = null;
+  /** The runtime error once `status` is `error`. */
+  public error: RuntimeError | null = null;
+  /** Instructions executed since the last `load()`. */
+  public instructionCount = 0;
+
   private readonly maxInstructions: number;
+  private readonly nativeContext: NativeCallContext;
 
   constructor(source?: string, options: VMOptions = {}) {
     this.source = source;
     const limit = options.maxInstructions ?? DEFAULT_MAX_INSTRUCTIONS;
     this.maxInstructions = limit > 0 ? limit : Infinity;
-    this.initGlobals();
+    this.nativeContext = { receiver: undefined, print: line => this.output.push(line) };
+    this.globals = createNatives();
   }
 
-  private initGlobals(): void {
-    for (const [name, nativeVal] of createNatives(line => this.output.push(line))) {
-      this.globals.set(name, nativeVal);
-    }
-  }
-
-  public defineNative(name: string, arity: number, fn: (args: Value[]) => Value): void {
-    const nativeVal: NativeFunctionValue = {
-      kind: 'native',
-      name,
-      arity,
-      fn,
-    };
-    this.globals.set(name, nativeVal);
-  }
-
+  /** Compile and run a program to completion. */
   public interpret(source: string): VMResult {
     this.source = source;
     this.output = [];
@@ -136,10 +150,28 @@ export class VM {
     return this.run(compiled.chunk);
   }
 
+  /** Run a compiled program to completion (or until the instruction limit). */
   public run(chunk: Chunk): VMResult {
+    this.load(chunk);
+    this.execute(Infinity);
+    return {
+      success: this.status === 'halted',
+      output: this.output,
+      result: this.result,
+      error: this.error ?? undefined,
+    };
+  }
+
+  /** Reset all execution state and prepare `chunk` as the main script. */
+  public load(chunk: Chunk): void {
     this.stack = [];
     this.frames = [];
     this.openUpvalues = [];
+    this.output = [];
+    this.globals = createNatives();
+    this.result = null;
+    this.error = null;
+    this.instructionCount = 0;
 
     const scriptFn: FunctionValue = {
       kind: 'function',
@@ -149,33 +181,38 @@ export class VM {
       chunk,
       upvalues: [],
     };
+    const mainClosure: ClosureValue = { kind: 'closure', fn: scriptFn, upvalues: [] };
 
-    const mainClosure: ClosureValue = {
-      kind: 'closure',
-      fn: scriptFn,
-      upvalues: [],
-    };
-
-    this.push(mainClosure);
-    this.call(mainClosure, 0);
-
-    return this.execute();
+    this.stack.push(mainClosure);
+    this.frames.push({ closure: mainClosure, ip: 0, slots: 0 });
+    this.status = 'running';
   }
 
-  private execute(): VMResult {
-    let frame = this.frames[this.frames.length - 1]!;
-    let executed = 0;
+  /** Execute exactly one instruction. */
+  public step(): VMStatus {
+    return this.execute(1);
+  }
 
-    while (true) {
+  /**
+   * Execute up to `budget` instructions. Stops early when the program halts or
+   * fails, and returns the resulting status.
+   */
+  public execute(budget: number): VMStatus {
+    if (this.status !== 'running') return this.status;
+
+    let frame = this.frames[this.frames.length - 1]!;
+
+    for (let remaining = budget; remaining > 0; remaining--) {
       if (frame.ip >= frame.closure.fn.chunk.code.length) {
-        break;
+        this.halt(this.stack.length > 0 ? this.peek(0) : null);
+        return this.status;
       }
 
       const instruction = frame.closure.fn.chunk.code[frame.ip++] as OpCode;
-      const currentLoc = frame.closure.fn.chunk.locations[frame.ip - 1] ?? { line: 1, column: 1, offset: 0 };
+      const currentLoc = frame.closure.fn.chunk.locations[frame.ip - 1] ?? UNKNOWN_LOC;
 
       try {
-        if (++executed > this.maxInstructions) {
+        if (++this.instructionCount > this.maxInstructions) {
           throw new Error(
             `Execution stopped after reaching the instruction limit (${this.maxInstructions.toLocaleString('en-US')}). Is there an infinite loop?`,
           );
@@ -254,13 +291,13 @@ export class VM {
           case OpCode.OP_GET_UPVALUE: {
             const slot = frame.closure.fn.chunk.code[frame.ip++]!;
             const upvalue = frame.closure.upvalues[slot]!;
-            this.push(upvalue.closed !== null ? upvalue.closed : this.stack[upvalue.location]!);
+            this.push(upvalue.isClosed ? upvalue.closed : this.stack[upvalue.location]!);
             break;
           }
           case OpCode.OP_SET_UPVALUE: {
             const slot = frame.closure.fn.chunk.code[frame.ip++]!;
             const upvalue = frame.closure.upvalues[slot]!;
-            if (upvalue.closed !== null) {
+            if (upvalue.isClosed) {
               upvalue.closed = this.peek(0);
             } else {
               this.stack[upvalue.location] = this.peek(0);
@@ -441,11 +478,8 @@ export class VM {
             this.frames.pop();
 
             if (this.frames.length === 0) {
-              return {
-                success: true,
-                output: this.output,
-                result,
-              };
+              this.halt(result);
+              return this.status;
             }
 
             // Remove all local variables of returning frame from stack
@@ -585,32 +619,30 @@ export class VM {
           }
 
           case OpCode.OP_HALT:
-            return {
-              success: true,
-              output: this.output,
-              result: this.peek(0),
-            };
+            this.halt(this.peek(0));
+            return this.status;
         }
-      } catch (err: any) {
-        const callStack = this.frames.map(f => ({
-          fnName: f.closure.fn.name || 'anonymous',
-          loc: f.closure.fn.chunk.locations[Math.max(0, f.ip - 1)] ?? currentLoc,
-        })).reverse();
-
-        const runtimeErr = new RuntimeError(err.message, currentLoc, callStack, this.source);
-        return {
-          success: false,
-          output: this.output,
-          error: runtimeErr,
-        };
+      } catch (err: unknown) {
+        this.fail(err instanceof Error ? err.message : String(err), currentLoc);
+        return this.status;
       }
     }
 
-    return {
-      success: true,
-      output: this.output,
-      result: this.stack.length > 0 ? this.peek(0) : null,
-    };
+    return this.status;
+  }
+
+  private halt(result: Value): void {
+    this.result = result;
+    this.status = 'halted';
+  }
+
+  private fail(message: string, loc: SourceLocation): void {
+    const callStack = this.frames.map(f => ({
+      fnName: f.closure.fn.name || 'anonymous',
+      loc: f.closure.fn.chunk.locations[Math.max(0, f.ip - 1)] ?? loc,
+    })).reverse();
+    this.error = new RuntimeError(message, loc, callStack, this.source);
+    this.status = 'error';
   }
 
   private callValue(callee: Value, argCount: number): void {
@@ -628,8 +660,8 @@ export class VM {
           args.unshift(this.pop());
         }
         this.pop(); // Pop native function itself
-        const res = callee.fn(args);
-        this.push(res);
+        this.nativeContext.receiver = callee.receiver;
+        this.push(callee.fn(args, this.nativeContext));
         return;
       }
       if (callee.kind === 'struct') {
@@ -679,6 +711,7 @@ export class VM {
     }
     const upval: Upvalue = {
       location: localIndex,
+      isClosed: false,
       closed: null,
     };
     this.openUpvalues.push(upval);
@@ -690,6 +723,7 @@ export class VM {
       const upval = this.openUpvalues[i]!;
       if (upval.location >= lastSlot) {
         upval.closed = this.stack[upval.location]!;
+        upval.isClosed = true;
         this.openUpvalues.splice(i, 1);
       }
     }

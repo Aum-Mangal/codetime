@@ -122,8 +122,8 @@ print("Fib:", fib10, "Sorted:", sorted)
   // Summary Metrics
   const sampleDbg = TimeTravelDebugger.fromSource(largeSource);
   const dbgResult = results.find(r => r.name.includes('Debugger'))!;
-  console.log(`Recorded Snapshots per Run : ${sampleDbg.totalSteps} steps`);
-  console.log(`Snapshot Recording Speed  : ${Math.round((sampleDbg.totalSteps * 100 / dbgResult.timeMs) * 1000).toLocaleString()} steps/sec`);
+  console.log(`Recorded Steps per Run : ${sampleDbg.totalSteps} steps`);
+  console.log(`Recording Speed        : ${Math.round((sampleDbg.totalSteps * 100 / dbgResult.timeMs) * 1000).toLocaleString()} steps/sec`);
   console.log('===========================================================\n');
 }
 

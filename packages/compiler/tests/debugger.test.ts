@@ -1,33 +1,45 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { TimeTravelDebugger } from '../src/debugger/debugger.js';
+import { VM } from '../src/vm/vm.js';
+import type { ExecutionSnapshot } from '../src/debugger/types.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 const examplesDir = path.resolve(__dirname, '../../../examples');
+const readExample = (name: string): string => fs.readFileSync(path.join(examplesDir, name), 'utf-8');
+
+/** Every step's snapshot; only for small programs. */
+function allSnapshots(dbg: TimeTravelDebugger): ExecutionSnapshot[] {
+  return Array.from({ length: dbg.totalSteps }, (_, i) => dbg.snapshotAt(i));
+}
+
+function localsOf(snap: ExecutionSnapshot): Record<string, string> {
+  const top = snap.frames[snap.frames.length - 1]!;
+  return Object.fromEntries(top.locals.map(v => [v.name, v.displayValue]));
+}
+
+function globalOf(snap: ExecutionSnapshot, name: string): string | undefined {
+  return snap.globals.find(g => g.name === name)?.displayValue;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — History Recording', () => {
-  it('records a non-empty history for any valid program', () => {
+describe('TimeTravelDebugger — Recording', () => {
+  it('records at least one step for any valid program', () => {
     const dbg = TimeTravelDebugger.fromSource('let x = 1');
     expect(dbg.totalSteps).toBeGreaterThan(0);
-    expect(dbg.history.length).toBe(dbg.totalSteps);
+    expect(dbg.getTimeline().length).toBe(dbg.totalSteps);
   });
 
-  it('every snapshot has a valid source location', () => {
+  it('every step has a valid source location', () => {
     const dbg = TimeTravelDebugger.fromSource(`
 let a = 1
 let b = 2
 let c = a + b
 `);
-    for (const snap of dbg.history) {
+    for (const snap of allSnapshots(dbg)) {
       expect(snap.sourceLine).toBeGreaterThan(0);
       expect(snap.sourceColumn).toBeGreaterThan(0);
     }
-  });
-
-  it('timeline length equals totalSteps', () => {
-    const dbg = TimeTravelDebugger.fromSource('print("hi")');
-    expect(dbg.getTimeline().length).toBe(dbg.totalSteps);
   });
 
   it('output accumulates correctly through execution', () => {
@@ -38,6 +50,8 @@ print("c")
 `);
     dbg.gotoEnd();
     expect(dbg.getCurrentSnapshot().output).toEqual(['a', 'b', 'c']);
+    const firstPrint = dbg.getTimeline().findIndex(e => e.type === 'print');
+    expect(dbg.snapshotAt(firstPrint).output).toEqual(['a']);
   });
 
   it('captures a "print" event type in the timeline', () => {
@@ -46,10 +60,128 @@ print("c")
     expect(printEvents.length).toBeGreaterThan(0);
     expect(printEvents[0]!.description).toContain('hello');
   });
+
+  it('getEvents returns a window with correct step indices', () => {
+    const dbg = TimeTravelDebugger.fromSource(readExample('fibonacci.ct'));
+    const all = dbg.getTimeline();
+    const window = dbg.getEvents(10, 19);
+    expect(window.map(e => e.stepIndex)).toEqual([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+    expect(window).toEqual(all.slice(10, 20));
+  });
+
+  it('a compile error is thrown before recording', () => {
+    expect(() => TimeTravelDebugger.fromSource('let = 1')).toThrow();
+  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Navigation (stepForward / stepBackward / gotoStep)', () => {
+describe('TimeTravelDebugger — Checkpoint and replay', () => {
+  const programs = ['fibonacci.ct', 'closures.ct', 'buggy.ct', 'arrays.ct', 'hello.ct']
+    .filter(f => fs.existsSync(path.join(examplesDir, f)));
+
+  it.each(programs)('%s: state at every step is the same for any checkpoint interval', (file) => {
+    const src = readExample(file);
+    const dense = TimeTravelDebugger.fromSource(src, { checkpointInterval: 3 });
+    const sparse = TimeTravelDebugger.fromSource(src, { checkpointInterval: 1_000_000 });
+    expect(dense.totalSteps).toBe(sparse.totalSteps);
+
+    // Every step in order, then a shuffled sample so restores, forward replays
+    // and cache hits all happen.
+    const steps = Array.from({ length: dense.totalSteps }, (_, i) => i);
+    for (const step of steps) {
+      expect(dense.snapshotAt(step)).toEqual(sparse.snapshotAt(step));
+    }
+    const shuffled = steps.map((_, i) => steps[(i * 7919) % steps.length]!);
+    for (const step of shuffled.slice(0, 200)) {
+      expect(dense.snapshotAt(step)).toEqual(sparse.snapshotAt(step));
+    }
+  });
+
+  it('final output matches the CLI virtual machine', () => {
+    for (const file of programs) {
+      const src = readExample(file);
+      const res = new VM(src).interpret(src);
+      const dbg = TimeTravelDebugger.fromSource(src, { checkpointInterval: 5 });
+      dbg.gotoEnd();
+      expect(dbg.getCurrentSnapshot().output).toEqual(res.output);
+    }
+  });
+
+  it('aliasing survives a checkpoint: two names for one array stay linked', () => {
+    const src = `
+let a = [1]
+let b = a
+let i = 0
+while i < 20 { i += 1 }
+b.push(2)
+print(a)
+`;
+    const dbg = TimeTravelDebugger.fromSource(src, { checkpointInterval: 4 });
+    dbg.gotoEnd();
+    expect(dbg.getCurrentSnapshot().output).toEqual(['[1, 2]']);
+    expect(globalOf(dbg.getCurrentSnapshot(), 'a')).toBe('[1, 2]');
+  });
+
+  it('a closure restored from a checkpoint still shares its captured variable', () => {
+    const src = `
+fn counter() {
+  let n = 0
+  fn inc() {
+    n += 1
+    return n
+  }
+  return inc
+}
+let c = counter()
+let out = []
+let i = 0
+while i < 10 {
+  out.push(c())
+  i += 1
+}
+print(out)
+`;
+    const dbg = TimeTravelDebugger.fromSource(src, { checkpointInterval: 2 });
+    for (let step = 0; step < dbg.totalSteps; step += 13) dbg.gotoStep(step);
+    dbg.gotoEnd();
+    expect(dbg.getCurrentSnapshot().output).toEqual(['[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]']);
+  });
+
+  it('thins checkpoints when there are too many and doubles the interval', () => {
+    const src = 'let i = 0\nwhile i < 2000 { i += 1 }\nprint(i)';
+    const dbg = TimeTravelDebugger.fromSource(src, { checkpointInterval: 10, maxCheckpoints: 8 });
+    const stats = dbg.getStats();
+    expect(stats.checkpoints).toBeLessThanOrEqual(8);
+    expect(stats.checkpointInterval).toBeGreaterThan(10);
+    const reference = TimeTravelDebugger.fromSource(src, { checkpointInterval: 1_000_000 });
+    for (const step of [0, 1, 999, 5000, dbg.totalSteps - 1]) {
+      expect(dbg.snapshotAt(step)).toEqual(reference.snapshotAt(step));
+    }
+  });
+
+  it('stores a compact trace instead of a full snapshot per step', () => {
+    const src = 'let a = []\nlet i = 0\nwhile i < 5000 {\n  a.push(i)\n  i += 1\n}\nprint(len(a))';
+    const dbg = TimeTravelDebugger.fromSource(src);
+    const stats = dbg.getStats();
+    expect(stats.traceBytes).toBe(stats.totalSteps * 20);
+    expect(stats.checkpoints).toBeLessThanOrEqual(200);
+    dbg.gotoEnd();
+    expect(dbg.getCurrentSnapshot().output).toEqual(['5000']);
+    expect(dbg.snapshotAt(Math.floor(dbg.totalSteps / 2)).globals.find(g => g.name === 'i')).toBeDefined();
+  });
+
+  it('marks the recording truncated instead of silently stopping', () => {
+    const dbg = TimeTravelDebugger.fromSource('let i = 0\nwhile true { i += 1 }', { maxSteps: 500 });
+    expect(dbg.totalSteps).toBe(500);
+    expect(dbg.isTruncated).toBe(true);
+    expect(dbg.getCurrentState().isTruncated).toBe(true);
+    expect(dbg.getStats().truncatedReason).toContain('500');
+    expect(dbg.hasRecordingError).toBe(false);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+describe('TimeTravelDebugger — Instruction navigation', () => {
   let dbg: TimeTravelDebugger;
 
   beforeEach(() => {
@@ -73,28 +205,14 @@ let z = x + y
     expect(s.currentStep).toBe(dbg.totalSteps - 1);
   });
 
-  it('stepForward advances by 1', () => {
-    dbg.restart();
-    const s = dbg.stepForward();
-    expect(s.currentStep).toBe(1);
-  });
-
-  it('stepBackward decrements by 1', () => {
+  it('stepForward / stepBackward move by one and clamp at the ends', () => {
+    expect(dbg.stepForward().currentStep).toBe(1);
     dbg.gotoStep(5);
-    const s = dbg.stepBackward();
-    expect(s.currentStep).toBe(4);
-  });
-
-  it('stepBackward does not go below 0', () => {
+    expect(dbg.stepBackward().currentStep).toBe(4);
     dbg.restart();
-    dbg.stepBackward();
-    expect(dbg.currentStep).toBe(0);
-  });
-
-  it('stepForward does not exceed last step', () => {
+    expect(dbg.stepBackward().currentStep).toBe(0);
     dbg.gotoEnd();
-    dbg.stepForward();
-    expect(dbg.currentStep).toBe(dbg.totalSteps - 1);
+    expect(dbg.stepForward().currentStep).toBe(dbg.totalSteps - 1);
   });
 
   it('gotoStep clamps to valid range', () => {
@@ -103,149 +221,97 @@ let z = x + y
     dbg.gotoStep(999999);
     expect(dbg.currentStep).toBe(dbg.totalSteps - 1);
   });
-
-  it('restart() resets to step 0', () => {
-    dbg.gotoEnd();
-    dbg.restart();
-    expect(dbg.currentStep).toBe(0);
-    expect(dbg.getCurrentState().isAtStart).toBe(true);
-  });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Variable State Restoration', () => {
-  it('globals are undefined before their assignment step', () => {
+describe('TimeTravelDebugger — Variable state', () => {
+  it('globals appear only once defined', () => {
     const dbg = TimeTravelDebugger.fromSource(`
 let x = 10
 let y = 20
 let z = x + y
 `);
-    // Find the step where x is first defined
-    const assignX = dbg.getTimeline().findIndex(e => e.varName === 'x' && e.type === 'assign');
-    expect(assignX).toBeGreaterThan(-1);
+    const timeline = dbg.getTimeline();
+    const assignX = timeline.findIndex(e => e.varName === 'x' && e.type === 'assign');
+    const assignY = timeline.findIndex(e => e.varName === 'y' && e.type === 'assign');
+    const assignZ = timeline.findIndex(e => e.varName === 'z' && e.type === 'assign');
 
-    // Find y and z
-    const assignY = dbg.getTimeline().findIndex(e => e.varName === 'y' && e.type === 'assign');
-    const assignZ = dbg.getTimeline().findIndex(e => e.varName === 'z' && e.type === 'assign');
+    let snap = dbg.gotoStep(assignX).snapshot;
+    expect(globalOf(snap, 'x')).toBe('10');
+    expect(globalOf(snap, 'y')).toBeUndefined();
 
-    // At the step x was assigned, only x exists
-    dbg.gotoStep(assignX);
-    let g = dbg.getCurrentSnapshot().globals;
-    expect(g.find(v => v.name === 'x')?.displayValue).toBe('10');
-    expect(g.find(v => v.name === 'y')).toBeUndefined();
+    snap = dbg.gotoStep(assignY).snapshot;
+    expect(globalOf(snap, 'y')).toBe('20');
+    expect(globalOf(snap, 'z')).toBeUndefined();
 
-    // At the step y was assigned, x & y exist, z does not
-    dbg.gotoStep(assignY);
-    g = dbg.getCurrentSnapshot().globals;
-    expect(g.find(v => v.name === 'x')?.displayValue).toBe('10');
-    expect(g.find(v => v.name === 'y')?.displayValue).toBe('20');
-    expect(g.find(v => v.name === 'z')).toBeUndefined();
-
-    // At the step z was assigned, all three exist
-    dbg.gotoStep(assignZ);
-    g = dbg.getCurrentSnapshot().globals;
-    expect(g.find(v => v.name === 'z')?.displayValue).toBe('30');
+    snap = dbg.gotoStep(assignZ).snapshot;
+    expect(globalOf(snap, 'z')).toBe('30');
   });
 
-  it('variable values can be observed at earlier steps after stepping backward', () => {
+  it('earlier values are visible after stepping backward', () => {
     const dbg = TimeTravelDebugger.fromSource(`
 let counter = 0
 counter = 1
 counter = 2
 counter = 3
 `);
-    // Find all counter assignment steps
     const steps = dbg.getTimeline()
       .map((e, i) => ({ e, i }))
       .filter(({ e }) => e.varName === 'counter' && e.type === 'assign');
-
-    expect(steps.length).toBeGreaterThanOrEqual(4);
-
-    // At each step, counter holds the corresponding value
-    for (const { e, i } of steps) {
-      dbg.gotoStep(i);
-      const g = dbg.getCurrentSnapshot().globals;
-      const v = g.find(x => x.name === 'counter');
-      expect(v?.displayValue).toBe(e.varValue);
+    expect(steps.length).toBe(4);
+    for (const { e, i } of [...steps].reverse()) {
+      expect(globalOf(dbg.gotoStep(i).snapshot, 'counter')).toBe(e.varValue);
     }
   });
 
-  it('changed flag is set on a variable when its value changes', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let n = 0
-n = 1
-`);
-    const mutateStep = dbg.getTimeline().findIndex(e => e.varName === 'n' && e.varValue === '1');
-    expect(mutateStep).toBeGreaterThan(-1);
-
-    dbg.gotoStep(mutateStep);
-    const g = dbg.getCurrentSnapshot().globals;
-    const nVar = g.find(v => v.name === 'n');
-    expect(nVar?.changed).toBe(true);
+  it('marks the variable written by the current step as changed', () => {
+    const dbg = TimeTravelDebugger.fromSource('let n = 0\nn = 1');
+    const step = dbg.getTimeline().findIndex(e => e.varName === 'n' && e.varValue === '1');
+    const n = dbg.gotoStep(step).snapshot.globals.find(v => v.name === 'n');
+    expect(n?.changed).toBe(true);
+    const other = dbg.gotoStep(step + 1).snapshot.globals.find(v => v.name === 'n');
+    expect(other?.changed).toBe(false);
   });
-});
 
-// ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Call Stack Frames', () => {
-  it('tracks call frames correctly on function call and return', () => {
+  it('names locals correctly when sibling blocks reuse a stack slot', () => {
     const dbg = TimeTravelDebugger.fromSource(`
-fn add(a, b) {
-  let temp = a + b
-  return temp
+fn f() {
+  if true {
+    let first = 1
+    print(first)
+  }
+  if true {
+    let second = 2
+    print(second)
+  }
 }
-let res = add(3, 4)
+f()
 `);
-    // Find a step inside add()
-    const insideAdd = dbg.history.findIndex(s => s.frames.length >= 2 && s.frames[s.frames.length - 1]?.fnName === 'add');
-    expect(insideAdd).toBeGreaterThan(-1);
-
-    dbg.gotoStep(insideAdd);
-    const frames = dbg.getCallStack();
-    expect(frames.length).toBeGreaterThanOrEqual(2);
-    expect(frames[frames.length - 1]?.fnName).toBe('add');
-
-    // Parameters a and b should be visible
-    const topLocals = frames[frames.length - 1]!.locals;
-    expect(topLocals.find(l => l.name === 'a')?.displayValue).toBe('3');
-    expect(topLocals.find(l => l.name === 'b')?.displayValue).toBe('4');
+    const prints = dbg.getTimeline().filter(e => e.type === 'print').map(e => e.stepIndex);
+    expect(localsOf(dbg.snapshotAt(prints[0]!))).toEqual({ first: '1' });
+    expect(localsOf(dbg.snapshotAt(prints[1]!))).toEqual({ second: '2' });
   });
 
-  it('call stack shrinks after function returns', () => {
+  it('shows a block local only while it is in scope', () => {
     const dbg = TimeTravelDebugger.fromSource(`
-fn double(x) { return x * 2 }
-let r = double(5)
-`);
-    // Find the return event
-    const returnStep = dbg.history.findIndex(s => s.event.type === 'return' && s.event.fnName === 'double');
-    expect(returnStep).toBeGreaterThan(-1);
-
-    dbg.gotoStep(returnStep);
-    // The snapshot is captured AFTER OP_RETURN executes, so we're already back in 'main'
-    const snap = dbg.getCurrentSnapshot();
-    // The return event's fnName tells us which function returned
-    expect(snap.event.fnName).toBe('double');
-
-    // The frame stack should now have returned to just main
-    expect(snap.frames.length).toBe(1);
-  });
-
-  it('recursive call builds up the call stack', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-fn fact(n) {
-  if n <= 1 { return 1 }
-  return n * fact(n - 1)
+fn g(a) {
+  let total = a
+  for item in [1, 2] {
+    let doubled = item * 2
+    total += doubled
+  }
+  return total
 }
-let r = fact(4)
+print(g(5))
 `);
-    // Find deepest call stack
-    const maxDepth = Math.max(...dbg.history.map(s => s.frames.length));
-    expect(maxDepth).toBeGreaterThanOrEqual(5); // main + fact(4) + fact(3) + fact(2) + fact(1)
+    const timeline = dbg.getTimeline();
+    const inLoop = timeline.findIndex(e => e.varName === 'total' && e.varValue === '7');
+    expect(localsOf(dbg.snapshotAt(inLoop))).toEqual({ a: '5', total: '7', item: '1', doubled: '2' });
+    const ret = timeline.findIndex(e => e.type === 'return' && e.fnName === 'g');
+    expect(localsOf(dbg.snapshotAt(ret - 1))).toEqual({ a: '5', total: '11' });
   });
-});
 
-// ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Closures and Upvalues', () => {
-  it('captures closure upvalue state at each step', () => {
+  it('shows variables captured by a closure', () => {
     const dbg = TimeTravelDebugger.fromSource(`
 fn makeCounter(start) {
   let count = start
@@ -255,181 +321,300 @@ fn makeCounter(start) {
   }
   return inc
 }
-let c = makeCounter(0)
-let r1 = c()
-let r2 = c()
+let c = makeCounter(5)
+c()
 `);
-    // r1 should be 1, r2 should be 2
-    const r1Step = dbg.getTimeline().findIndex(e => e.varName === 'r1' && e.type === 'assign');
-    const r2Step = dbg.getTimeline().findIndex(e => e.varName === 'r2' && e.type === 'assign');
-
-    expect(r1Step).toBeGreaterThan(-1);
-    expect(r2Step).toBeGreaterThan(r1Step);
-
-    dbg.gotoStep(r1Step);
-    expect(dbg.getCurrentSnapshot().globals.find(g => g.name === 'r1')?.displayValue).toBe('1');
-
-    dbg.gotoStep(r2Step);
-    expect(dbg.getCurrentSnapshot().globals.find(g => g.name === 'r2')?.displayValue).toBe('2');
+    const write = dbg.getTimeline().findIndex(e => e.varName === 'count' && e.varValue === '6');
+    const top = dbg.snapshotAt(write).frames.at(-1)!;
+    expect(top.fnName).toBe('inc');
+    expect(top.locals).toContainEqual(expect.objectContaining({ name: 'count', displayValue: '6', captured: true, changed: true }));
   });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Breakpoints API', () => {
-  it('setBreakpoint / removeBreakpoint / getBreakpoints', () => {
+describe('TimeTravelDebugger — Call stack', () => {
+  it('tracks call frames on call and return', () => {
+    const dbg = TimeTravelDebugger.fromSource(`
+fn add(a, b) {
+  let temp = a + b
+  return temp
+}
+let res = add(3, 4)
+`);
+    const insideAdd = allSnapshots(dbg).findIndex(s => s.frames.at(-1)?.fnName === 'add');
+    expect(insideAdd).toBeGreaterThan(-1);
+    const frames = dbg.gotoStep(insideAdd).snapshot.frames;
+    expect(frames.map(f => f.fnName)).toEqual(['main', 'add']);
+    expect(localsOf(dbg.getCurrentSnapshot())).toMatchObject({ a: '3', b: '4' });
+  });
+
+  it('call stack shrinks after the function returns', () => {
+    const dbg = TimeTravelDebugger.fromSource(`
+fn double(x) { return x * 2 }
+let r = double(5)
+`);
+    const returnStep = dbg.getTimeline().findIndex(e => e.type === 'return' && e.fnName === 'double');
+    const snap = dbg.gotoStep(returnStep).snapshot;
+    expect(snap.event.fnName).toBe('double');
+    expect(snap.frames.length).toBe(1);
+  });
+
+  it('recursion builds up the call stack', () => {
+    const dbg = TimeTravelDebugger.fromSource(`
+fn fact(n) {
+  if n <= 1 { return 1 }
+  return n * fact(n - 1)
+}
+let r = fact(4)
+`);
+    const maxDepth = Math.max(...allSnapshots(dbg).map(s => s.frames.length));
+    expect(maxDepth).toBe(5); // main + fact(4..1)
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+describe('TimeTravelDebugger — Line stepping (forward and reverse)', () => {
+  const src = `fn square(n) {
+  let r = n * n
+  return r
+}
+let a = square(3)
+let b = square(4)
+print(a + b)`;
+
+  const lineOf = (dbg: TimeTravelDebugger) => dbg.getCurrentSnapshot().sourceLine;
+
+  it('stepOver moves line by line in the same function', () => {
+    const dbg = TimeTravelDebugger.fromSource(src);
+    const lines = [lineOf(dbg)];
+    while (!dbg.getCurrentState().isAtEnd) lines.push(lineOf(dbg.stepOver() && dbg));
+    expect(lines.slice(0, 4)).toEqual([1, 5, 6, 7]);
+  });
+
+  it('stepInto enters a call and stepOut returns to the caller', () => {
+    const dbg = TimeTravelDebugger.fromSource(src);
+    dbg.stepOver(); // line 5: let a = square(3)
+    dbg.stepInto();
+    expect(lineOf(dbg)).toBe(2);
+    expect(dbg.getCallStack().at(-1)!.fnName).toBe('square');
+    dbg.stepOut();
+    expect(dbg.getCallStack().length).toBe(1);
+    expect(lineOf(dbg)).toBe(5);
+  });
+
+  it('reverseStepOver walks lines backward, skipping calls', () => {
+    const dbg = TimeTravelDebugger.fromSource(src);
+    dbg.gotoEnd();
+    dbg.reverseStepOver();
+    expect(lineOf(dbg)).toBe(7);
+    dbg.reverseStepOver();
+    expect(lineOf(dbg)).toBe(6);
+    dbg.reverseStepOver();
+    expect(lineOf(dbg)).toBe(5);
+    expect(dbg.getCallStack().length).toBe(1);
+  });
+
+  it('reverseStepInto enters the callee backward, like gdb reverse-step', () => {
+    const dbg = TimeTravelDebugger.fromSource(src);
+    dbg.stepOver();
+    dbg.stepOver(); // line 6, after square(3) returned
+    const lines: number[] = [];
+    for (let i = 0; i < 3; i++) lines.push(lineOf(dbg.reverseStepInto() && dbg));
+    expect(lines).toEqual([3, 2, 5]);
+    expect(dbg.getCallStack().length).toBe(1);
+  });
+
+  it('reverseStepOut goes back to the line that made the call', () => {
+    const dbg = TimeTravelDebugger.fromSource(src);
+    dbg.stepOver();
+    dbg.stepOver();
+    dbg.stepInto(); // inside square(4)
+    expect(lineOf(dbg)).toBe(2);
+    dbg.reverseStepOut();
+    expect(lineOf(dbg)).toBe(6);
+    expect(dbg.getCallStack().length).toBe(1);
+  });
+
+  it('stepOver treats each loop iteration of a one-line loop as a new line', () => {
+    const dbg = TimeTravelDebugger.fromSource('let i = 0\nwhile i < 3 { i += 1 }\nprint(i)');
+    dbg.stepOver();
+    const visits: string[] = [];
+    while (!dbg.getCurrentState().isAtEnd && lineOf(dbg) === 2) {
+      visits.push(globalOf(dbg.getCurrentSnapshot(), 'i')!);
+      dbg.stepOver();
+    }
+    expect(visits.length).toBeGreaterThanOrEqual(4);
+    expect(lineOf(dbg)).toBe(3);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+describe('TimeTravelDebugger — Breakpoints', () => {
+  const loopSrc = `let total = 0
+let i = 0
+while i < 6 {
+  total += i
+  i += 1
+}
+print(total)`;
+
+  it('setBreakpoint / removeBreakpoint / toggle / clear', () => {
     const dbg = TimeTravelDebugger.fromSource('let x = 1');
     dbg.setBreakpoint(1);
     dbg.setBreakpoint(5);
     expect(dbg.getBreakpoints().length).toBe(2);
-
     dbg.removeBreakpoint(1);
-    expect(dbg.getBreakpoints().length).toBe(1);
-    expect(dbg.getBreakpoints()[0]!.line).toBe(5);
-
+    expect(dbg.getBreakpoints()).toEqual([{ line: 5, enabled: true }]);
+    dbg.toggleBreakpoint(3);
+    dbg.toggleBreakpoint(5);
+    expect(dbg.getBreakpoints().map(b => b.line)).toEqual([3]);
     dbg.clearBreakpoints();
     expect(dbg.getBreakpoints().length).toBe(0);
   });
 
-  it('toggleBreakpoint adds and removes', () => {
+  it('continue stops at each hit, then at the end', () => {
+    const dbg = TimeTravelDebugger.fromSource(loopSrc);
+    dbg.setBreakpoint(4);
+    const seen: string[] = [];
+    for (;;) {
+      const state = dbg.continueToBreakpoint();
+      if (state.isAtEnd) break;
+      expect(state.snapshot.sourceLine).toBe(4);
+      seen.push(globalOf(state.snapshot, 'i')!);
+    }
+    expect(seen).toEqual(['0', '1', '2', '3', '4', '5']);
+  });
+
+  it('reverseContinue runs backward to the previous hit', () => {
+    const dbg = TimeTravelDebugger.fromSource(loopSrc);
+    dbg.setBreakpoint(4);
+    dbg.gotoEnd();
+    expect(globalOf(dbg.reverseContinue().snapshot, 'i')).toBe('5');
+    expect(globalOf(dbg.reverseContinue().snapshot, 'i')).toBe('4');
+  });
+
+  it('a conditional breakpoint only stops where the condition is true', () => {
+    const dbg = TimeTravelDebugger.fromSource(loopSrc);
+    dbg.setBreakpoint(4, 'i == 3 or total > 100');
+    const state = dbg.continueToBreakpoint();
+    expect(state.snapshot.sourceLine).toBe(4);
+    expect(globalOf(state.snapshot, 'i')).toBe('3');
+    expect(dbg.continueToBreakpoint().isAtEnd).toBe(true);
+    expect(dbg.getBreakpoints()[0]!.condition).toBe('i == 3 or total > 100');
+  });
+
+  it('conditions can read locals, and their side effects do not leak', () => {
+    const dbg = TimeTravelDebugger.fromSource(`fn f(items) {
+  let n = len(items)
+  return n
+}
+let data = [1, 2, 3]
+print(f(data))
+print(len(data))`);
+    dbg.setBreakpoint(3, 'items.pop() == 3 and n == 3');
+    expect(dbg.continueToBreakpoint().snapshot.sourceLine).toBe(3);
+    dbg.gotoEnd();
+    expect(dbg.getCurrentSnapshot().output).toEqual(['3', '3']);
+  });
+
+  it('rejects a condition that does not parse', () => {
     const dbg = TimeTravelDebugger.fromSource('let x = 1');
-    dbg.toggleBreakpoint(3);
-    expect(dbg.getBreakpoints().length).toBe(1);
-    dbg.toggleBreakpoint(3);
-    expect(dbg.getBreakpoints().length).toBe(0);
-  });
-
-  it('continueToBreakpoint stops at the breakpointed line', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let a = 1
-let b = 2
-let c = 3
-`);
-    dbg.restart();
-
-    // Find line number for "let b = 2" (line 3 with blank first line)
-    const bStep = dbg.getTimeline().findIndex(e => e.varName === 'b' && e.type === 'assign');
-    const bLine = dbg.history[bStep]!.sourceLine;
-
-    dbg.setBreakpoint(bLine);
-    dbg.continueToBreakpoint();
-
-    // Should have stopped at or after the b assignment
-    expect(dbg.getCurrentSnapshot().sourceLine).toBe(bLine);
+    expect(() => dbg.setBreakpoint(1, 'x ==')).toThrow(/breakpoint condition/);
   });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — stepOver()', () => {
-  it('stepOver skips low-level steps to reach the next significant event', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let x = 10
-let y = 20
-`);
-    dbg.restart();
+describe('TimeTravelDebugger — Watchpoints (when did this variable change?)', () => {
+  it('finds the previous and next write to a variable', () => {
+    const dbg = TimeTravelDebugger.fromSource('let x = 1\nlet y = 2\nx = 5\ny = 3\nx = 9');
+    const end = dbg.totalSteps - 1;
+    const last = dbg.findChange('x', 'backward', end);
+    expect(globalOf(dbg.snapshotAt(last), 'x')).toBe('9');
+    const before = dbg.findChange('x', 'backward', last);
+    expect(globalOf(dbg.snapshotAt(before), 'x')).toBe('5');
+    expect(dbg.findChange('x', 'forward', before)).toBe(last);
+    expect(dbg.findChange('x', 'forward', last)).toBe(-1);
+    expect(dbg.findChange('nope', 'backward')).toBe(-1);
+  });
 
-    const start = dbg.currentStep;
-    dbg.stepOver();
+  it('counts writes through an array element or method as changes', () => {
+    const dbg = TimeTravelDebugger.fromSource(`let arr = [0, 0]
+let other = 1
+arr[1] = 7
+other = 2
+arr.push(3)
+print(arr)`);
+    const end = dbg.totalSteps - 1;
+    const push = dbg.findChange('arr', 'backward', end);
+    expect(dbg.snapshotAt(push).sourceLine).toBe(5);
+    const index = dbg.findChange('arr', 'backward', push);
+    expect(dbg.snapshotAt(index).sourceLine).toBe(3);
+    expect(globalOf(dbg.snapshotAt(index), 'arr')).toBe('[0, 7]');
+  });
 
-    // Should have advanced to next assign/call/return/print
-    const snap = dbg.getCurrentSnapshot();
-    const interestingTypes = ['assign', 'call', 'return', 'print', 'halt', 'error'];
-    expect(interestingTypes).toContain(snap.event.type);
-    expect(dbg.currentStep).toBeGreaterThan(start);
+  it('finds the off-by-one in buggy.ct: the last write to hi before returning -1', () => {
+    const dbg = TimeTravelDebugger.fromSource(readExample('buggy.ct'));
+    const timeline = dbg.getTimeline();
+    const wrong = timeline.findIndex(e => e.type === 'return' && e.fnName === 'binarySearch' && e.description.endsWith('-1'));
+    expect(wrong).toBeGreaterThan(-1);
+    const write = dbg.findChange('hi', 'backward', wrong);
+    expect(write).toBeGreaterThan(-1);
+    expect(dbg.snapshotAt(write).frames.at(-1)!.fnName).toBe('binarySearch');
   });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Loop Iteration Tracking', () => {
-  it('captures loop event for each iteration of a while loop', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let i = 0
-while i < 3 {
-  i += 1
-}
-`);
-    const loopEvents = dbg.getTimeline().filter(e => e.type === 'loop');
-    // 3 iterations = 3 loop-back events
-    expect(loopEvents.length).toBe(3);
+describe('TimeTravelDebugger — Loops, lines and errors', () => {
+  it('records one loop event per while iteration', () => {
+    const dbg = TimeTravelDebugger.fromSource('let i = 0\nwhile i < 3 {\n  i += 1\n}');
+    expect(dbg.getTimeline().filter(e => e.type === 'loop').length).toBe(3);
   });
 
-  it('for-in loop tracks loop events for each element', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let arr = [10, 20, 30]
-for x in arr {
-  let _ = x
-}
-`);
-    const loopEvents = dbg.getTimeline().filter(e => e.type === 'loop');
-    expect(loopEvents.length).toBe(3);
+  it('records one loop event per for-in element', () => {
+    const dbg = TimeTravelDebugger.fromSource('let arr = [10, 20, 30]\nfor x in arr {\n  let _ = x\n}');
+    expect(dbg.getTimeline().filter(e => e.type === 'loop').length).toBe(3);
   });
-});
 
-// ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — getStepsForLine()', () => {
-  it('returns all step indices that executed on a given line', () => {
-    const src = `let x = 0
-while x < 3 {
-  x += 1
-}`;
-    const dbg = TimeTravelDebugger.fromSource(src);
-
-    // Line 3 is "x += 1" — should execute 3 times
-    const line3Steps = dbg.getStepsForLine(3);
-    expect(line3Steps.length).toBeGreaterThanOrEqual(3);
+  it('getStepsForLine and getLineHits report how often a line ran', () => {
+    const dbg = TimeTravelDebugger.fromSource('let x = 0\nwhile x < 3 {\n  x += 1\n}');
+    expect(dbg.getStepsForLine(3).length).toBeGreaterThanOrEqual(3);
+    expect(dbg.getLineHits().get(3)).toBe(3);
+    expect(dbg.getLineHits().get(1)).toBe(1);
   });
-});
 
-// ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Runtime Error Handling', () => {
-  it('captures a runtime error as an error snapshot and marks hasRecordingError', () => {
-    const dbg = TimeTravelDebugger.fromSource(`
-let arr = [1, 2, 3]
-let x = arr[999]
-`);
+  it('records a runtime error as the last step', () => {
+    const dbg = TimeTravelDebugger.fromSource('let arr = [1, 2, 3]\nlet x = arr[999]');
     expect(dbg.hasRecordingError).toBe(true);
     expect(dbg.recordingErrorMessage).toContain('out of bounds');
-
-    // Last snapshot should be an error event
-    const lastSnap = dbg.history[dbg.history.length - 1];
-    expect(lastSnap?.event.type).toBe('error');
+    expect(dbg.runtimeError?.loc.line).toBe(2);
+    const last = dbg.gotoEnd().snapshot;
+    expect(last.event.type).toBe('error');
+    expect(last.sourceLine).toBe(2);
   });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
-describe('TimeTravelDebugger — Integration: Example Programs', () => {
+describe('TimeTravelDebugger — Example programs', () => {
   it('debugs hello.ct', () => {
-    const src = fs.readFileSync(path.join(examplesDir, 'hello.ct'), 'utf-8');
-    const dbg = TimeTravelDebugger.fromSource(src);
-    dbg.gotoEnd();
-    expect(dbg.getCurrentSnapshot().output.length).toBeGreaterThan(0);
+    const dbg = TimeTravelDebugger.fromSource(readExample('hello.ct'));
+    expect(dbg.gotoEnd().snapshot.output.length).toBeGreaterThan(0);
   });
 
-  it('debugs fibonacci.ct — timeline has call events', () => {
-    const src = fs.readFileSync(path.join(examplesDir, 'fibonacci.ct'), 'utf-8');
-    const dbg = TimeTravelDebugger.fromSource(src);
-    const callEvents = dbg.getTimeline().filter(e => e.type === 'call');
-    expect(callEvents.length).toBeGreaterThan(0);
+  it('fibonacci.ct has call events', () => {
+    const dbg = TimeTravelDebugger.fromSource(readExample('fibonacci.ct'));
+    expect(dbg.getTimeline().some(e => e.type === 'call')).toBe(true);
   });
 
-  it('debugs closures.ct — closure creation events in timeline', () => {
-    const src = fs.readFileSync(path.join(examplesDir, 'closures.ct'), 'utf-8');
-    const dbg = TimeTravelDebugger.fromSource(src);
-    const closureEvents = dbg.getTimeline().filter(e => e.description.includes('closure'));
-    expect(closureEvents.length).toBeGreaterThan(0);
+  it('closures.ct has closure creation events', () => {
+    const dbg = TimeTravelDebugger.fromSource(readExample('closures.ct'));
+    expect(dbg.getTimeline().some(e => e.description.includes('closure'))).toBe(true);
   });
 
-  it('debugs buggy.ct — timeline contains call events for binarySearch', () => {
-    const src = fs.readFileSync(path.join(examplesDir, 'buggy.ct'), 'utf-8');
-    const dbg = TimeTravelDebugger.fromSource(src);
-    const callEvents = dbg.getTimeline().filter(e => e.type === 'call' && e.fnName === 'binarySearch');
-    expect(callEvents.length).toBeGreaterThan(0);
-
-    // Full reverse-navigation round trip
-    dbg.gotoEnd();
-    const endStep = dbg.currentStep;
-    dbg.restart();
-    expect(dbg.currentStep).toBe(0);
-    dbg.gotoStep(endStep);
-    expect(dbg.currentStep).toBe(endStep);
+  it('buggy.ct calls binarySearch and supports a full reverse round trip', () => {
+    const dbg = TimeTravelDebugger.fromSource(readExample('buggy.ct'));
+    expect(dbg.getTimeline().some(e => e.type === 'call' && e.fnName === 'binarySearch')).toBe(true);
+    const endStep = dbg.gotoEnd().currentStep;
+    expect(dbg.restart().currentStep).toBe(0);
+    expect(dbg.gotoStep(endStep).currentStep).toBe(endStep);
   });
 });

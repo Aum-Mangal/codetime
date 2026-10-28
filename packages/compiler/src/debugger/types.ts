@@ -1,12 +1,13 @@
 import { SourceLocation } from '../lexer/index.js';
-import { Value } from '../vm/value.js';
 
 export interface VariableSnapshot {
   name: string;
-  value: Value;
   type: string;
   displayValue: string;
-  changed?: boolean; // true if value changed from previous step
+  /** True when the current step wrote this variable. */
+  changed?: boolean;
+  /** True for a variable captured by the running closure (an upvalue). */
+  captured?: boolean;
 }
 
 export interface FrameSnapshot {
@@ -39,6 +40,7 @@ export interface DebuggerEvent {
   stepIndex: number;
 }
 
+/** Program state after one step (one executed bytecode instruction). */
 export interface ExecutionSnapshot {
   stepIndex: number;
   totalSteps: number;
@@ -59,10 +61,28 @@ export interface DebuggerState {
   isAtStart: boolean;
   isAtEnd: boolean;
   hasError: boolean;
+  /** True when recording stopped at the step limit before the program finished. */
+  isTruncated: boolean;
   snapshot: ExecutionSnapshot;
 }
 
 export interface Breakpoint {
   line: number;
   enabled: boolean;
+  /** Optional CodeTime expression; the breakpoint only stops where it is truthy. */
+  condition?: string;
+}
+
+export interface RecordingStats {
+  totalSteps: number;
+  /** Full VM snapshots kept (including the initial state). */
+  checkpoints: number;
+  /** Steps between checkpoints; doubles whenever old checkpoints are thinned out. */
+  checkpointInterval: number;
+  /** Bytes used by the per-step event log. */
+  traceBytes: number;
+  truncated: boolean;
+  /** Why recording stopped early, when `truncated` is true. */
+  truncatedReason?: string;
+  recordMs: number;
 }

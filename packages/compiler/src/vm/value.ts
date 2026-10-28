@@ -28,12 +28,18 @@ export interface FunctionValue {
   minArity: number;
   chunk: Chunk;
   upvalues: { index: number; isLocal: boolean }[];
-  localNames?: string[];
 }
 
+/**
+ * A variable captured by a closure. While the variable is still on the stack
+ * the upvalue is "open" and points at its slot; when the slot is popped the
+ * value moves into `closed`. `isClosed` is a separate flag because `null` is a
+ * legitimate CodeTime value and cannot double as the "still open" marker.
+ */
 export interface Upvalue {
-  location: number; // stack index
-  closed: Value | null;
+  location: number;
+  isClosed: boolean;
+  closed: Value;
 }
 
 export interface ClosureValue {
@@ -42,13 +48,26 @@ export interface ClosureValue {
   upvalues: Upvalue[];
 }
 
-export type NativeFn = (args: Value[]) => Value;
+/** What the VM hands to a native function besides its arguments. */
+export interface NativeCallContext {
+  /** The value a bound method was read from (`arr` in `arr.push(1)`). */
+  receiver: Value | undefined;
+  print(line: string): void;
+}
+
+/**
+ * Natives are plain functions with no captured state, so a VM snapshot can
+ * share them freely; per-call state comes in through the context.
+ */
+export type NativeFn = (args: Value[], ctx: NativeCallContext) => Value;
 
 export interface NativeFunctionValue {
   kind: 'native';
   name: string;
   arity: number; // -1 for variadic
   fn: NativeFn;
+  /** Set on bound methods such as `arr.push`: the object the method acts on. */
+  receiver?: Value;
 }
 
 export type Value =

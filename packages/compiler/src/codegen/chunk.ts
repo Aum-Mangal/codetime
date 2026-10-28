@@ -65,10 +65,35 @@ export enum OpCode {
   OP_JUMP_IF_ARG_PRESENT   = 43, // slot, hi, lo: skip default-value code when the argument was passed
 }
 
+/**
+ * Where a local variable lives while a function runs. The debugger uses these
+ * ranges to name stack slots: a local is live at instruction pointer `ip`
+ * when `startIp <= ip <= endIp`. Slots are reused by sibling scopes, so the
+ * slot number alone is not enough (this is the same idea as DWARF location
+ * lists in native debuggers).
+ */
+export interface LocalVariableInfo {
+  name: string;
+  slot: number;
+  /** Block nesting depth of the declaring scope (1 = function body). */
+  depth: number;
+  /** First instruction at which the value is on the stack. */
+  startIp: number;
+  /** Last instruction at which the value is still on the stack. */
+  endIp: number;
+}
+
+export interface ChunkDebugInfo {
+  locals: LocalVariableInfo[];
+  /** Name of each captured variable, indexed like the closure's upvalues. */
+  upvalueNames: string[];
+}
+
 export class Chunk {
   public code: number[] = [];
   public constants: Value[] = [];
   public locations: SourceLocation[] = [];
+  public debug: ChunkDebugInfo = { locals: [], upvalueNames: [] };
 
   /** Index of already-added string/number constants, so each appears once in the pool. */
   private primitiveIndex = new Map<string | number, number>();
