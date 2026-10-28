@@ -5,14 +5,21 @@ import * as path from 'node:path';
 import {
   Lexer,
   Parser,
-  SemanticAnalyzer,
-  BytecodeCompiler,
   VM,
+  compile,
   printAST,
   disassembleChunk,
+  isCodeTimeError,
+  DEFAULT_MAX_INSTRUCTIONS,
+  type CodeTimeError,
 } from '@codetime/compiler';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
+
+/** Exit codes: distinguish "your program is invalid" from "your program crashed". */
+const EXIT_COMPILE_ERROR = 1;
+const EXIT_RUNTIME_ERROR = 2;
+const EXIT_USAGE_ERROR = 64;
 
 function printHelp(): void {
   console.log(`
@@ -27,6 +34,12 @@ Usage:
   codetime --version, -v       Show version
   codetime --help, -h          Show this help message
 
+Options:
+  --max-steps <n>   Stop after n VM instructions (default ${DEFAULT_MAX_INSTRUCTIONS.toLocaleString('en-US')}, 0 = unlimited)
+
+Exit codes:
+  0 success, 1 compile error, 2 runtime error, 64 usage error
+
 Examples:
   codetime run examples/fibonacci.ct
   codetime compile examples/arrays.ct
@@ -34,23 +47,35 @@ Examples:
 `);
 }
 
+function usageError(message: string): never {
+  console.error(`Error: ${message}`);
+  process.exit(EXIT_USAGE_ERROR);
+}
+
 function readFile(filePath: string): string {
   const resolved = path.resolve(process.cwd(), filePath);
   if (!fs.existsSync(resolved)) {
-    console.error(`Error: File not found '${filePath}'`);
-    process.exit(1);
+    usageError(`File not found '${filePath}'`);
   }
   return fs.readFileSync(resolved, 'utf-8');
 }
 
-function runFile(filePath: string): void {
-  const source = readFile(filePath);
-  runSource(source, filePath);
+function reportDiagnostics(diagnostics: CodeTimeError[], source: string): void {
+  console.error(diagnostics.map(d => d.format(source)).join('\n\n'));
 }
 
-function runSource(source: string, filename = '<stdin>'): void {
-  const vm = new VM(source);
-  const result = vm.interpret(source);
+function runSource(source: string, maxInstructions: number): void {
+  const compiled = compile(source);
+  for (const warning of compiled.warnings) {
+    console.error(warning.format(source) + '\n');
+  }
+  if (!compiled.chunk) {
+    reportDiagnostics(compiled.diagnostics, source);
+    process.exit(EXIT_COMPILE_ERROR);
+  }
+
+  const vm = new VM(source, { maxInstructions });
+  const result = vm.run(compiled.chunk);
 
   if (result.output.length > 0) {
     console.log(result.output.join('\n'));
@@ -58,14 +83,13 @@ function runSource(source: string, filename = '<stdin>'): void {
 
   if (!result.success && result.error) {
     console.error(result.error.format(source));
-    process.exit(1);
+    process.exit(EXIT_RUNTIME_ERROR);
   }
 }
 
 function showTokens(filePath: string): void {
   const source = readFile(filePath);
-  const lexer = new Lexer(source);
-  const tokens = lexer.tokenize();
+  const tokens = new Lexer(source).tokenize();
 
   console.log(`Tokens for ${filePath}:\n`);
   for (const t of tokens) {
@@ -76,102 +100,98 @@ function showTokens(filePath: string): void {
 
 function showAST(filePath: string): void {
   const source = readFile(filePath);
-  const tokens = new Lexer(source).tokenize();
-  const parser = new Parser(tokens, source);
-  const ast = parser.parse();
+  const { program, errors } = new Parser(new Lexer(source).tokenize(), source).parseProgram();
+  if (errors.length > 0) {
+    reportDiagnostics(errors, source);
+    process.exit(EXIT_COMPILE_ERROR);
+  }
 
   console.log(`AST for ${filePath}:\n`);
-  console.log(printAST(ast));
+  console.log(printAST(program));
 }
 
 function showBytecode(filePath: string): void {
   const source = readFile(filePath);
-  const tokens = new Lexer(source).tokenize();
-  const parser = new Parser(tokens, source);
-  const ast = parser.parse();
-
-  const analyzer = new SemanticAnalyzer(source);
-  const semResult = analyzer.analyze(ast);
-  if (semResult.errors.length > 0) {
-    console.error(semResult.errors[0]!.format(source));
-    process.exit(1);
+  const compiled = compile(source);
+  if (!compiled.chunk) {
+    reportDiagnostics(compiled.diagnostics, source);
+    process.exit(EXIT_COMPILE_ERROR);
   }
 
-  const compiler = new BytecodeCompiler('script', path.basename(filePath));
-  const chunk = compiler.compile(ast);
-
-  console.log(disassembleChunk(chunk, path.basename(filePath)));
+  console.log(disassembleChunk(compiled.chunk, path.basename(filePath)));
 }
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+/** Extract `--max-steps <n>` from argv, returning the remaining positional args. */
+function parseOptions(argv: string[]): { positional: string[]; maxInstructions: number } {
+  const positional: string[] = [];
+  let maxInstructions = DEFAULT_MAX_INSTRUCTIONS;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === '--max-steps') {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value < 0) {
+        usageError('--max-steps expects a non-negative integer.');
+      }
+      maxInstructions = value;
+    } else {
+      positional.push(arg);
+    }
+  }
+  return { positional, maxInstructions };
+}
 
-  if (args.length === 0 || args.includes('--help') || args.includes('-h') || args[0] === 'help') {
+function main(): void {
+  const rawArgs = process.argv.slice(2);
+
+  if (rawArgs.length === 0 || rawArgs.includes('--help') || rawArgs.includes('-h') || rawArgs[0] === 'help') {
     printHelp();
     return;
   }
 
-  if (args.includes('--version') || args.includes('-v')) {
+  if (rawArgs.includes('--version') || rawArgs.includes('-v')) {
     console.log(`CodeTime v${VERSION}`);
     return;
   }
 
-  const command = args[0];
-  const target = args[1];
+  const { positional, maxInstructions } = parseOptions(rawArgs);
+  const [command, target] = positional;
+
+  const requireTarget = (what: string): string => target ?? usageError(`Missing ${what} for "${command}".`);
 
   switch (command) {
     case 'run':
-      if (!target) {
-        console.error('Error: Missing file path for "run".');
-        process.exit(1);
-      }
-      runFile(target);
+      runSource(readFile(requireTarget('file path')), maxInstructions);
       break;
-
     case 'tokens':
-      if (!target) {
-        console.error('Error: Missing file path for "tokens".');
-        process.exit(1);
-      }
-      showTokens(target);
+      showTokens(requireTarget('file path'));
       break;
-
     case 'ast':
-      if (!target) {
-        console.error('Error: Missing file path for "ast".');
-        process.exit(1);
-      }
-      showAST(target);
+      showAST(requireTarget('file path'));
       break;
-
     case 'compile':
-      if (!target) {
-        console.error('Error: Missing file path for "compile".');
-        process.exit(1);
-      }
-      showBytecode(target);
+      showBytecode(requireTarget('file path'));
       break;
-
     case 'eval':
-      if (!target) {
-        console.error('Error: Missing code string for "eval".');
-        process.exit(1);
-      }
-      runSource(target, '<eval>');
+      runSource(requireTarget('code string'), maxInstructions);
       break;
-
     default:
-      if (fs.existsSync(path.resolve(process.cwd(), command))) {
+      if (command && fs.existsSync(path.resolve(process.cwd(), command))) {
         // If user passed a file directly: codetime file.ct
-        runFile(command);
+        runSource(readFile(command), maxInstructions);
       } else {
-        console.error(`Unknown command '${command}'. Use --help for usage.`);
-        process.exit(1);
+        usageError(`Unknown command '${command}'. Use --help for usage.`);
       }
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+try {
+  main();
+} catch (err) {
+  if (isCodeTimeError(err)) {
+    console.error(err.format());
+    process.exit(EXIT_COMPILE_ERROR);
+  }
+  // Anything else is a bug in CodeTime itself, not in the user's program.
+  console.error('Internal error in CodeTime (please report this):', err);
+  process.exit(EXIT_RUNTIME_ERROR);
+}
