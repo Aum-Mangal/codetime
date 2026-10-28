@@ -12,3 +12,7 @@ test-cdp.cjs
 test_*.cjs
 *.pdf
 CODETIME_COMPLETE_ENGINEERING_MASTERY.md
+
+# Playwright
+test-results/
+playwright-report/

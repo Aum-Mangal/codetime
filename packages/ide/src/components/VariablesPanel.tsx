@@ -32,6 +32,7 @@ const VariableList: React.FC<VariableListProps> = ({ title, icon, emptyText, var
         {variables.map((v) => (
           <div
             key={`${v.name}:${v.captured ? 'c' : 'l'}`}
+            data-variable={v.name}
             className={`group px-3 py-2 flex items-center justify-between gap-2 transition ${
               v.changed ? changedBg : 'hover:bg-slate-800/40'
             }`}
@@ -82,7 +83,7 @@ const VariableList: React.FC<VariableListProps> = ({ title, icon, emptyText, var
 
 export const VariablesPanel: React.FC<VariablesPanelProps> = ({ locals, globals, onFindChange }) => {
   return (
-    <div className="h-full flex flex-col bg-slate-900 text-xs font-mono select-text overflow-hidden">
+    <div data-testid="variables-panel" className="h-full flex flex-col bg-slate-900 text-xs font-mono select-text overflow-hidden">
       <div className="px-3 py-2 bg-slate-950 border-b border-slate-800 font-bold text-slate-300 flex items-center gap-2">
         <Variable className="w-4 h-4 text-sky-400" />
         Variables Inspector

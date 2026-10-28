@@ -71,6 +71,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({ timeline, stats, c
               <button
                 key={step}
                 ref={isActive ? activeRef : undefined}
+                aria-current={isActive ? 'step' : undefined}
                 onClick={() => onGotoStep(step)}
                 className={`group relative flex-shrink-0 px-2.5 py-1.5 rounded-lg border text-left transition ${
                   isActive

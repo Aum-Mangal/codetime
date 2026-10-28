@@ -10,7 +10,7 @@ export interface ConsolePanelProps {
 
 export const ConsolePanel: React.FC<ConsolePanelProps> = ({ output, error, onClear }) => {
   return (
-    <div className="h-full flex flex-col bg-slate-950 text-xs font-mono select-text overflow-hidden">
+    <div data-testid="console" className="h-full flex flex-col bg-slate-950 text-xs font-mono select-text overflow-hidden">
       <div className="px-3 py-1.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
         <div className="flex items-center gap-2 font-bold text-slate-300">
           <Terminal className="w-3.5 h-3.5 text-emerald-400" />
