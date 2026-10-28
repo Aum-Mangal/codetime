@@ -566,6 +566,40 @@ print(x)`;
 
 // ──────────────────────────────────────────────────────────────────────────────
 describe('TimeTravelDebugger — Watchpoints (when did this variable change?)', () => {
+  it('a let declaration inside a function is a write, including one initialized by a call', () => {
+    const dbg = TimeTravelDebugger.fromSource(`fn f() {
+  let lo = 0
+  let n = len([1, 2])
+  let g = h()
+  lo = 5
+  return lo + n + g
+}
+fn h() {
+  return 7
+}
+print(f())`);
+    const writes = (name: string) => dbg.getTimeline().filter(e => e.varName === name);
+    expect(writes('lo').map(e => [e.loc.line, e.description])).toEqual([[2, 'let lo = 0'], [5, 'lo = 5']]);
+    expect(writes('n').map(e => [e.loc.line, e.type, e.varValue])).toEqual([[3, 'call', '2']]);
+    // `g` gets its value when h() returns, so that return step is the write.
+    expect(writes('g').map(e => [e.loc.line, e.type, e.varValue])).toEqual([[9, 'return', '7']]);
+
+    dbg.gotoStep(writes('lo')[1]!.stepIndex - 1);
+    expect(dbg.lineOf(dbg.findChange('lo', 'backward'))).toBe(2);
+  });
+
+  it('a loop jumping back to where a local was declared is not a write', () => {
+    const dbg = TimeTravelDebugger.fromSource(`fn f() {
+  let i = 0
+  while i < 3 {
+    i += 1
+  }
+  return i
+}
+print(f())`);
+    expect(dbg.getTimeline().filter(e => e.varName === 'i').map(e => e.loc.line)).toEqual([2, 4, 4, 4]);
+  });
+
   it("lineOf reads a step's line without replaying", () => {
     const dbg = TimeTravelDebugger.fromSource('let x = 1\nlet y = 2\nx = 5');
     const lastX = dbg.findChange('x', 'backward', dbg.totalSteps);

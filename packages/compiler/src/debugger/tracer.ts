@@ -6,7 +6,7 @@
  * (event kind and the variable written, if any); replay asks for the
  * human-readable description of the step being displayed.
  */
-import { OpCode } from '../codegen/chunk.js';
+import { OpCode, type Chunk } from '../codegen/chunk.js';
 import type { SourceLocation } from '../lexer/token.js';
 import type { VM, VMStatus } from '../vm/vm.js';
 import type { Value } from '../vm/value.js';
@@ -47,6 +47,26 @@ function calleeName(callee: Value | undefined): string {
     case 'function': return callee.name;
     default: return 'fn';
   }
+}
+
+/**
+ * Per chunk: the instruction offset where each named local comes into scope,
+ * i.e. just after its initializer. A `let` inside a function compiles to no
+ * store instruction (the initializer's value simply stays in the local's
+ * stack slot), so reaching this offset is how the tracer sees the write.
+ */
+const declarationSites = new WeakMap<Chunk, Map<number, string>>();
+
+function declarationsOf(chunk: Chunk): Map<number, string> {
+  let sites = declarationSites.get(chunk);
+  if (!sites) {
+    sites = new Map();
+    for (const info of chunk.debug.locals) {
+      if (!isInternalName(info.name)) sites.set(info.startIp, info.name);
+    }
+    declarationSites.set(chunk, sites);
+  }
+  return sites;
 }
 
 const BINARY_SYMBOLS: Partial<Record<OpCode, string>> = {
@@ -195,6 +215,27 @@ export class StepTracer {
       }
       default:
         if (describe) out.description = this.describeSimple(vm, op, operand, left, right, top);
+    }
+
+    // The step that finishes a local's initializer declares it: `let lo = 0`,
+    // or the return from `f` in `let x = f()`.
+    if (out.target === null && status === 'running' && vm.frames.length <= out.depth) {
+      const returned = vm.frames.length < out.depth;
+      const current = vm.frames[vm.frames.length - 1]!;
+      const next = current.ip;
+      const declared = returned || (next > ip && op !== OpCode.OP_LOOP)
+        ? declarationsOf(current.closure.fn.chunk).get(next)
+        : undefined;
+      if (declared !== undefined) {
+        const kind = out.kind;
+        const description = out.description;
+        assign(declared, top, `let ${declared} = ${short(top)}`);
+        // Keep a branch or call visible as such; it also happened on this step.
+        if (kind !== EventKind.Step) {
+          out.kind = kind;
+          if (describe) out.description = description;
+        }
+      }
     }
     return status;
   }
