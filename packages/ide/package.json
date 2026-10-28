@@ -1,6 +1,6 @@
 {
   "name": "@codetime/ide",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Browser-based Visual Time-Travel IDE for the CodeTime programming language",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@codetime/compiler": "^1.1.0",
+    "@codetime/compiler": "^1.2.0",
     "@monaco-editor/react": "^4.6.0",
     "lucide-react": "^0.420.0",
     "monaco-editor": "^0.57.0",

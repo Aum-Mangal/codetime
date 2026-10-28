@@ -1,6 +1,6 @@
 {
   "name": "@codetime/compiler",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "CodeTime language compiler: lexer, parser, AST, semantic analyzer, bytecode compiler, and VM",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

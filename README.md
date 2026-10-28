@@ -12,34 +12,40 @@
 
 ---
 
-## 📸 Visual Time-Travel IDE in Action
+## 📸 The IDE
 
-![CodeTime Visual Time-Travel IDE](assets/codetime-debugger-preview.svg)
+![CodeTime IDE paused inside binarySearch, after stepping backward from the wrong -1 result](assets/codetime-ide.png)
 
-> *Illustration of the IDE layout.* Open the [live IDE](https://aum-mangal.github.io/codetime/) and pick **Buggy Binary Search** to try the real thing: run it, then step backward from a wrong `-1` result to find the off-by-one in the loop condition.
+*A real screenshot of the production build.* The **Buggy Binary Search** example is paused after stepping **backward** from its wrong `-1` result into the call that produced it.
+- Gutter: the amber diamond on line 23 is a conditional breakpoint (`lo == hi`).
+- Inline values: grey text shows each variable's current value, on the line that last wrote it.
+- Run scrubber (top): the whole 336-step recording, colored by event kind. Calls show as raised plateaus, and red ticks mark where the breakpoint stops.
+
+[Try it live](https://aum-mangal.github.io/codetime/): press **Debug**, then **Go to last step**, then **Reverse step over** and **Reverse step into**. You land where `lo == hi`, one candidate left unchecked: the off-by-one in `while lo < hi`.
 
 ---
 
-## ⚡ Performance Benchmarks
+## ⚡ Performance
 
-Measured with `npm run bench` on a single ~25-line program (recursive Fibonacci plus a bubble sort of 10 numbers). These are micro-benchmarks of each stage, not a comparison against other languages. Results vary by up to ~50% between runs on the same laptop, so treat them as rough orders of magnitude:
+Measured with `npm run bench` and `npm run bench:replay` on the development machine (Node 24, Intel i5-11320H). CI runs both on every push and attaches the results as an artifact.
 
-| Pipeline Stage / Component | Sample Size | Throughput | Latency / Speed |
-|---|---|---|---|
-| **Lexer Tokenization** | 2,000 runs | **25,000+ ops/sec** | ~0.04 ms / run |
-| **Parser AST Generation** | 2,000 runs | **11,500+ ops/sec** | ~0.08 ms / run |
-| **Semantic Scope Analysis** | 2,000 runs | **150,000+ ops/sec** | ~0.006 ms / run |
-| **Bytecode Compilation** | 2,000 runs | **95,000+ ops/sec** | ~0.01 ms / run |
-| **VM Execution (Full Program)** | 1,000 runs | **7,500+ runs/sec** | ~0.13 ms / run |
-| **Time-Travel Recording** | 100 runs | **1,700,000+ steps/sec** | ~0.0006 ms / step |
+**Three realistic programs** (tinybench means; seek latency is over 300 random jumps):
 
-The debugger has its own benchmark (`npm run bench:replay`) for a loop that pushes N items into an array. These are the numbers before and after the checkpoint + replay rewrite:
+| Program | VM steps | Compile | Plain VM run | Record with debugger | Event log | Seek to any step (p50 / p99) |
+|---|---:|---:|---:|---:|---:|---:|
+| fib(20), recursive | 262,696 | 28 µs | 5.4 ms | 157 ms | 5.0 MB | 0.66 / 2.2 ms |
+| insertion sort, 200 items | 297,697 | 93 µs | 5.8 ms | 186 ms | 5.7 MB | 0.62 / 2.0 ms |
+| closures + arrays, 10k iterations | 300,290 | 71 µs | 6.5 ms | 191 ms | 5.7 MB | 0.75 / 2.3 ms |
 
-| Items pushed | Steps | Snapshot per step (v1.1) | Checkpoint + replay | Seek to any step (p99) |
+The plain VM runs about 50 million instructions per second. Recording is about 30 times slower (about 1.6 million steps per second), because it steps the VM one instruction at a time and writes an event log entry for each step. That is the cost of being able to travel backward.
+
+**Against the previous design** (a full copy of the VM state after every step), on a loop that pushes N items into an array:
+
+| Items pushed | Steps | Copy per step: record, memory | Checkpoint + replay: record, memory | Seek p99 |
 |---:|---:|---:|---:|---:|
-| 500 | 9,016 | 146 ms, 41 MB | 19 ms, 0.5 MB | 1.8 ms |
-| 5,000 | 90,016 | 12.6 s, 3.1 GB | 89 ms, 1.9 MB | 1.6 ms |
-| 20,000 | 360,016 | over the step cap | 270 ms, 14.1 MB | 5.3 ms |
+| 500 | 9,016 | 65 ms, 26.1 MB | 17 ms, under 0.5 MB | 2.6 ms |
+| 2,000 | 36,016 | 479 ms, 310.6 MB | 55 ms, 0.3 MB | 2.3 ms |
+| 20,000 | 360,016 | not feasible | 309 ms, 14.1 MB | 4.9 ms |
 
 ---
 
@@ -61,6 +67,8 @@ The project is structured as a TypeScript monorepo featuring a full compiler pip
 ---
 
 ## 🏗️ How I Built This (Key Engineering Decisions)
+
+The main decisions are written up as architecture decision records in [docs/adr](docs/adr/README.md), each with the alternatives considered and what it costs.
 
 The bytecode design (opcodes, call frames, open/closed upvalues for closures) follows the clox VM from Robert Nystrom's [*Crafting Interpreters*](https://craftinginterpreters.com/). The time-travel debugger, structs, default parameters, error recovery and the IDE are CodeTime's own.
 
@@ -231,6 +239,12 @@ codetime/
 ├── assets/               Visual previews and diagrams
 └── .github/workflows/    CI test workflow and automated GitHub Pages deployment
 ```
+
+---
+
+## 🤝 Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the checks CI runs, and project conventions. Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 

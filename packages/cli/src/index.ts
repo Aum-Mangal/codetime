@@ -14,7 +14,7 @@ import {
   type CodeTimeError,
 } from '@codetime/compiler';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 /** Exit codes: distinguish "your program is invalid" from "your program crashed". */
 const EXIT_COMPILE_ERROR = 1;
